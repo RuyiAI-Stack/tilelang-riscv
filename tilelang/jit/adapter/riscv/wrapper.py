@@ -536,6 +536,8 @@ def build_qemu_executable(
             str(out_path),
         ]
         cmd.extend(_infer_riscv_abi_flag(obj_path))
+        if not os.environ.get("TILELANG_RISCV_MARCH"):
+            cmd.append("-march=rv64gc")
         cmd.extend(_riscv_clang_flags())
         if clang_flags:
             cmd.extend(clang_flags)

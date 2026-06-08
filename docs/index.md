@@ -15,6 +15,8 @@ low-level optimizations necessary for state-of-the-art performance.
 get_started/Installation
 get_started/overview
 get_started/targets
+get_started/BuildOnSG2044
+get_started/RiscvOperatorAgentWorkflow
 :::
 
 :::{toctree}

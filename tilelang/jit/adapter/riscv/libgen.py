@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import tempfile
 from pathlib import Path
@@ -13,6 +14,7 @@ from tilelang.tladapter.utils import Pipeline
 
 
 DEFAULT_RISCV_TRIPLE = os.environ.get("TILELANG_RISCV_TRIPLE", "riscv64-unknown-linux-gnu")
+DEFAULT_RISCV_LLC_MATTR = os.environ.get("TILELANG_RISCV_LLC_MATTR", "+m,+a,+f,+d,+c")
 
 
 def _extract_mlir_source(value: Any) -> str:
@@ -111,16 +113,17 @@ def _emit_llc_artifact(
         ll_path = temp_dir_path / "kernel.ll"
         out_path = temp_dir_path / f"kernel.{ 's' if filetype == 'asm' else 'o' }"
         ll_path.write_text(llvm_ir)
-        _run_checked(
-            [
-                str(resolve_tool("llc")),
-                f"-mtriple={triple}",
-                f"-filetype={filetype}",
-                str(ll_path),
-                "-o",
-                str(out_path),
-            ]
-        )
+        cmd = [
+            str(resolve_tool("llc")),
+            f"-mtriple={triple}",
+            f"-filetype={filetype}",
+        ]
+        if DEFAULT_RISCV_LLC_MATTR:
+            cmd.append(f"-mattr={DEFAULT_RISCV_LLC_MATTR}")
+        if os.environ.get("TILELANG_RISCV_LLC_FLAGS"):
+            cmd.extend(shlex.split(os.environ["TILELANG_RISCV_LLC_FLAGS"]))
+        cmd.extend([str(ll_path), "-o", str(out_path)])
+        _run_checked(cmd)
         if filetype == "asm":
             text = out_path.read_text()
             if path is not None:

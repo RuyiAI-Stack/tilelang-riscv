@@ -650,7 +650,7 @@ private:
     if (type.isIndex()) {
       return builder_.create<mlir::arith::ConstantIndexOp>(loc_, value);
     }
-    return builder_.create<mlir::arith::ConstantIntOp>(loc_, type, value);
+    return builder_.create<mlir::arith::ConstantIntOp>(loc_, value, type);
   }
 
   mlir::Value ZeroIndex() { return ConstantIntLike(0, builder_.getIndexType()); }
@@ -1135,7 +1135,7 @@ private:
     if (mlir::isa<mlir::FloatType>(value_type)) {
       mlir::Type zero_type = value_type;
       mlir::Value zero = builder_.create<mlir::arith::ConstantFloatOp>(
-          loc_, mlir::cast<mlir::FloatType>(zero_type), llvm::APFloat(0.0));
+          loc_, llvm::APFloat(0.0), mlir::cast<mlir::FloatType>(zero_type));
       return builder_.create<mlir::arith::CmpFOp>(loc_, mlir::arith::CmpFPredicate::UNE, value,
                                                   zero);
     }
@@ -1222,10 +1222,11 @@ private:
 
     mlir::MemRefType result_type;
     if (target_buffer->shape.size() == source_region->region.size()) {
-      result_type = mlir::memref::SubViewOp::inferResultType(source_type, offsets, sizes, strides);
+      result_type = mlir::cast<mlir::MemRefType>(
+          mlir::memref::SubViewOp::inferResultType(source_type, offsets, sizes, strides));
     } else {
-      result_type = mlir::memref::SubViewOp::inferRankReducedResultType(
-          LowerStaticShape(target_buffer->shape), source_type, offsets, sizes, strides);
+      result_type = mlir::cast<mlir::MemRefType>(mlir::memref::SubViewOp::inferRankReducedResultType(
+          LowerStaticShape(target_buffer->shape), source_type, offsets, sizes, strides));
     }
 
     return builder_
@@ -1240,8 +1241,8 @@ private:
     llvm::SmallVector<mlir::OpFoldResult, 4> offsets = LowerRegionOffsets(region->region);
     llvm::SmallVector<mlir::OpFoldResult, 4> sizes = LowerRegionSizes(region->region);
     llvm::SmallVector<mlir::OpFoldResult, 4> strides = UnitStrides(region->region.size());
-    mlir::MemRefType result_type =
-        mlir::memref::SubViewOp::inferResultType(source_type, offsets, sizes, strides);
+    mlir::MemRefType result_type = mlir::cast<mlir::MemRefType>(
+        mlir::memref::SubViewOp::inferResultType(source_type, offsets, sizes, strides));
     return builder_
         .create<mlir::memref::SubViewOp>(loc_, result_type, source, offsets, sizes, strides)
         .getResult();
@@ -1264,8 +1265,9 @@ private:
     llvm::SmallVector<mlir::OpFoldResult, 4> offsets = LowerRegionOffsets(region->region);
     llvm::SmallVector<mlir::OpFoldResult, 4> sizes = LowerRegionSizes(region->region);
     llvm::SmallVector<mlir::OpFoldResult, 4> strides = UnitStrides(region->region.size());
-    mlir::MemRefType result_type = mlir::memref::SubViewOp::inferRankReducedResultType(
-        LowerStaticShape(logical_extents), source_type, offsets, sizes, strides);
+    mlir::MemRefType result_type = mlir::cast<mlir::MemRefType>(
+        mlir::memref::SubViewOp::inferRankReducedResultType(LowerStaticShape(logical_extents),
+                                                            source_type, offsets, sizes, strides));
     return builder_
         .create<mlir::memref::SubViewOp>(loc_, result_type, source, offsets, sizes, strides)
         .getResult();
