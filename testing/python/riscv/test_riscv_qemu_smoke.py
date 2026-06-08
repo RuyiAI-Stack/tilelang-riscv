@@ -11,7 +11,11 @@ from tilelang.jit.adapter.riscv import resolve_riscv_runner
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-EXAMPLE = REPO_ROOT / "examples" / "riscv" / "example_vector_add.py"
+EXAMPLES = (
+    ("vector_add", REPO_ROOT / "examples" / "riscv" / "example_vector_add.py"),
+    ("reduce_sum", REPO_ROOT / "examples" / "riscv" / "example_reduce_sum.py"),
+    ("matmul", REPO_ROOT / "examples" / "riscv" / "example_matmul.py"),
+)
 
 
 def _env() -> dict[str, str]:
@@ -27,18 +31,20 @@ def _env() -> dict[str, str]:
     return env
 
 
-def test_riscv_qemu_smoke_example_is_present():
-    assert EXAMPLE.is_file()
+@pytest.mark.parametrize("example_name,example_path", EXAMPLES)
+def test_riscv_qemu_smoke_example_is_present(example_name, example_path):
+    assert example_path.is_file(), example_name
 
 
-def test_riscv_example_vector_add_runs_on_qemu(tmp_path):
+@pytest.mark.parametrize("example_name,example_path", EXAMPLES)
+def test_riscv_examples_run_on_qemu(example_name, example_path, tmp_path):
     pytest.importorskip("tilelang.tladapter._native")
     if resolve_riscv_runner(required=False) is None:
         pytest.skip("qemu/spike runner not available on this machine")
 
-    output_dir = tmp_path / "vector_add_qemu"
+    output_dir = tmp_path / f"{example_name}_qemu"
     result = subprocess.run(
-        [sys.executable, str(EXAMPLE), "--run-qemu", "--output-dir", str(output_dir)],
+        [sys.executable, str(example_path), "--run-qemu", "--output-dir", str(output_dir)],
         cwd=REPO_ROOT,
         env=_env(),
         text=True,
@@ -46,7 +52,7 @@ def test_riscv_example_vector_add_runs_on_qemu(tmp_path):
         check=False,
     )
     if result.returncode != 0:
-        raise AssertionError(f"qemu smoke failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+        raise AssertionError(f"{example_name} qemu smoke failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
 
     assert "qemu check passed" in result.stdout
-    assert (output_dir / "vector_add.qemu.elf").is_file()
+    assert (output_dir / f"{example_name}.qemu.elf").is_file()
