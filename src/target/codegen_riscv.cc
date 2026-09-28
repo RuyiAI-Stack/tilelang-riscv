@@ -1579,25 +1579,25 @@ private:
     }
 
     mlir::Value VisitExpr_(const tir::AndNode* op) final {
-      mlir::Value lhs = outer_->LowerConditionValue(VisitExpr(op->a), op->a.dtype());
-      mlir::Value rhs = outer_->LowerConditionValue(VisitExpr(op->b), op->b.dtype());
+      mlir::Value lhs = outer_->LowerLogicalValue(VisitExpr(op->a), op->a.dtype());
+      mlir::Value rhs = outer_->LowerLogicalValue(VisitExpr(op->b), op->b.dtype());
       return outer_->builder_.create<mlir::arith::AndIOp>(outer_->loc_, lhs, rhs);
     }
 
     mlir::Value VisitExpr_(const tir::OrNode* op) final {
-      mlir::Value lhs = outer_->LowerConditionValue(VisitExpr(op->a), op->a.dtype());
-      mlir::Value rhs = outer_->LowerConditionValue(VisitExpr(op->b), op->b.dtype());
+      mlir::Value lhs = outer_->LowerLogicalValue(VisitExpr(op->a), op->a.dtype());
+      mlir::Value rhs = outer_->LowerLogicalValue(VisitExpr(op->b), op->b.dtype());
       return outer_->builder_.create<mlir::arith::OrIOp>(outer_->loc_, lhs, rhs);
     }
 
     mlir::Value VisitExpr_(const tir::NotNode* op) final {
-      mlir::Value value = outer_->LowerConditionValue(VisitExpr(op->a), op->a.dtype());
-      mlir::Value one = outer_->ConstantIntLike(1, outer_->builder_.getI1Type());
+      mlir::Value value = outer_->LowerLogicalValue(VisitExpr(op->a), op->a.dtype());
+      mlir::Value one = outer_->CreateBooleanTrueLike(value.getType());
       return outer_->builder_.create<mlir::arith::XOrIOp>(outer_->loc_, value, one);
     }
 
     mlir::Value VisitExpr_(const tir::SelectNode* op) final {
-      mlir::Value cond = outer_->LowerConditionValue(VisitExpr(op->condition), op->condition.dtype());
+      mlir::Value cond = outer_->LowerLogicalValue(VisitExpr(op->condition), op->condition.dtype());
       mlir::Value true_value =
           outer_->CastValue(VisitExpr(op->true_value), op->true_value.dtype(), op->dtype);
       mlir::Value false_value =
@@ -5511,6 +5511,31 @@ private:
     TVM_FFI_UNREACHABLE();
   }
 
+  mlir::Value LowerLogicalValue(mlir::Value value, DataType source_dtype) {
+    if (auto vector_type = mlir::dyn_cast<mlir::VectorType>(value.getType())) {
+      ICHECK_EQ(vector_type.getRank(), 1)
+          << "RISC-V vector logical values require a fixed rank-1 vector";
+      ICHECK(!vector_type.isScalable())
+          << "RISC-V vector logical values do not support scalable vectors";
+      ICHECK(vector_type.getElementType().isInteger(1))
+          << "RISC-V vector logical values require i1 elements";
+      return value;
+    }
+    return LowerConditionValue(value, source_dtype);
+  }
+
+  mlir::Value CreateBooleanTrueLike(mlir::Type type) {
+    mlir::Value one = ConstantIntLike(1, builder_.getI1Type());
+    if (type.isInteger(1)) {
+      return one;
+    }
+    auto vector_type = mlir::dyn_cast<mlir::VectorType>(type);
+    ICHECK(vector_type && vector_type.getRank() == 1 && !vector_type.isScalable() &&
+           vector_type.getElementType().isInteger(1))
+        << "RISC-V boolean true materialization requires i1 or fixed vector<Nxi1>";
+    return builder_.create<mlir::vector::BroadcastOp>(loc_, vector_type, one);
+  }
+
   mlir::Value LowerCondition(const PrimExpr& expr) {
     return LowerConditionValue(VisitExpr(expr), expr.dtype());
   }
@@ -7113,6 +7138,34 @@ private:
       ICHECK(IsIntegerLikeType(input.buffer->dtype) && IsIntegerLikeType(result_dtype))
           << "Bitwise tile reductions require integer-like input and output dtypes";
     }
+
+    const auto* reduce_ramp = ResolveRampExpr(input_load->indices[reduce_dim]);
+    bool supports_fixed_vector_max =
+        input.buffer->dtype == result_dtype &&
+        (input.buffer->dtype == DataType::Float(32) ||
+         input.buffer->dtype == DataType::Float(64));
+    bool use_fixed_vector_max =
+        kind == TileReductionKind::kMax && clear && input.dim_lane_indices.size() == 1 &&
+        reduce_dim == 0 && reduce_lanes > 1 && reduce_ramp != nullptr &&
+        tir::is_one(reduce_ramp->stride) && supports_fixed_vector_max &&
+        output.lane_counts.size() == 1 &&
+        output.lane_counts[0] == 1;
+    if (use_fixed_vector_max) {
+      mlir::Value input_vector = VisitExpr(tvm::ffi::GetRef<PrimExpr>(input_load));
+      auto vector_type = mlir::dyn_cast<mlir::VectorType>(input_vector.getType());
+      ICHECK(vector_type && vector_type.getRank() == 1 && !vector_type.isScalable())
+          << "RISC-V fixed max reduction expected a fixed rank-1 vector load";
+      ICHECK_EQ(static_cast<size_t>(vector_type.getNumElements()), reduce_lanes)
+          << "RISC-V fixed max reduction lane count mismatch";
+      mlir::Value reduced = builder_.create<mlir::vector::ReductionOp>(
+          loc_, mlir::vector::CombiningKind::MAXIMUMF, input_vector);
+      llvm::SmallVector<mlir::Value, 4> output_indices =
+          BuildTileReduceOutputIndices(output, input.lane_counts.size(), reduce_dim, {},
+                                       output_keeps_reduced_dim);
+      StoreScalarTileReduceValue(output.buffer, output_indices, reduced, result_dtype);
+      return;
+    }
+
     ReductionLoopNestMatch::Kind combine_kind = TileReductionCombineKind(kind);
     EnumerateStaticTileCoordinates(output_lane_counts, [&](llvm::ArrayRef<size_t> output_coords) {
       llvm::SmallVector<mlir::Value, 4> output_indices =
@@ -10532,24 +10585,32 @@ private:
   }
 
   mlir::Value VisitExpr_(const tir::AndNode* op) final {
-    mlir::Value lhs = LowerCondition(op->a);
-    mlir::Value rhs = LowerCondition(op->b);
+    mlir::Value lhs = LowerLogicalValue(VisitExpr(op->a), op->a.dtype());
+    mlir::Value rhs = LowerLogicalValue(VisitExpr(op->b), op->b.dtype());
     return builder_.create<mlir::arith::AndIOp>(loc_, lhs, rhs);
   }
 
   mlir::Value VisitExpr_(const tir::OrNode* op) final {
-    mlir::Value lhs = LowerCondition(op->a);
-    mlir::Value rhs = LowerCondition(op->b);
+    mlir::Value lhs = LowerLogicalValue(VisitExpr(op->a), op->a.dtype());
+    mlir::Value rhs = LowerLogicalValue(VisitExpr(op->b), op->b.dtype());
     return builder_.create<mlir::arith::OrIOp>(loc_, lhs, rhs);
   }
 
   mlir::Value VisitExpr_(const tir::NotNode* op) final {
-    mlir::Value value = LowerCondition(op->a);
-    mlir::Value one = ConstantIntLike(1, builder_.getI1Type());
+    mlir::Value value = LowerLogicalValue(VisitExpr(op->a), op->a.dtype());
+    mlir::Value one = CreateBooleanTrueLike(value.getType());
     return builder_.create<mlir::arith::XOrIOp>(loc_, value, one);
   }
 
   mlir::Value VisitExpr_(const tir::SelectNode* op) final {
+    if (op->condition.dtype().lanes() > 1) {
+      mlir::Value cond = LowerLogicalValue(VisitExpr(op->condition), op->condition.dtype());
+      mlir::Value true_value =
+          CastValue(VisitExpr(op->true_value), op->true_value.dtype(), op->dtype);
+      mlir::Value false_value =
+          CastValue(VisitExpr(op->false_value), op->false_value.dtype(), op->dtype);
+      return builder_.create<mlir::arith::SelectOp>(loc_, cond, true_value, false_value);
+    }
     return EmitConditionalValue(
         op->condition, op->dtype,
         [&]() { return CastValue(VisitExpr(op->true_value), op->true_value.dtype(), op->dtype); },
