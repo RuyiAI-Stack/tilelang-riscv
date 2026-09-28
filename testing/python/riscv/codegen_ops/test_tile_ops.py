@@ -441,3 +441,77 @@ def test_tile_gemm_transpose_b_codegen_op():
     assert "memref<2x3xf32>" in source
     assert "memref<4x3xf32>" in source
     assert _has_transpose_b_matmul(source)
+
+
+def test_tile_fixed_f32_max_reduction_uses_vector_reduction():
+    @T.prim_func
+    def tile_fixed_f32_max(A: T.Tensor((4,), "float32"), B: T.Tensor((1,), "float32")):
+        with T.Kernel(1, threads=1):
+            values = T.alloc_fragment((4,), "float32")
+            result = T.alloc_fragment((1,), "float32")
+            values[T.Ramp(0, 1, 4)] = A[T.Ramp(0, 1, 4)]
+            T.reduce_max(values, result, dim=0, clear=True)
+            B[0] = result[0]
+
+    source = lower_tilelang_prim_to_mlir(
+        tile_fixed_f32_max,
+        "tile_fixed_f32_max",
+        "tile/fixed_f32_max",
+    )
+    assert_contains_all(
+        source,
+        (
+            "vector.transfer_read",
+            "vector.reduction <maximumf>",
+            "vector<4xf32> into f32",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("dtype", "combining_kind", "mlir_type"),
+    (("float64", "maximumf", "vector<4xf64> into f64"),),
+)
+def test_tile_fixed_typed_max_reduction_uses_vector_reduction(dtype, combining_kind, mlir_type):
+    @T.prim_func
+    def tile_fixed_typed_max(A: T.Tensor((4,), dtype), B: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=1):
+            values = T.alloc_fragment((4,), dtype)
+            result = T.alloc_fragment((1,), dtype)
+            values[T.Ramp(0, 1, 4)] = A[T.Ramp(0, 1, 4)]
+            T.reduce_max(values, result, dim=0, clear=True)
+            B[0] = result[0]
+
+    source = lower_tilelang_prim_to_mlir(
+        tile_fixed_typed_max,
+        "tile_fixed_typed_max",
+        f"tile/fixed_{dtype}_max",
+    )
+    assert_contains_all(
+        source,
+        (
+            "vector.transfer_read",
+            f"vector.reduction <{combining_kind}>",
+            mlir_type,
+        ),
+    )
+
+
+def test_tile_fixed_f32_max_clear_false_uses_scalar_fallback():
+    @T.prim_func
+    def tile_fixed_f32_max_accumulate(A: T.Tensor((4,), "float32"), B: T.Tensor((1,), "float32")):
+        with T.Kernel(1, threads=1):
+            values = T.alloc_fragment((4,), "float32")
+            result = T.alloc_fragment((1,), "float32")
+            values[T.Ramp(0, 1, 4)] = A[T.Ramp(0, 1, 4)]
+            result[0] = B[0]
+            T.reduce_max(values, result, dim=0, clear=False)
+            B[0] = result[0]
+
+    source = lower_tilelang_prim_to_mlir(
+        tile_fixed_f32_max_accumulate,
+        "tile_fixed_f32_max_accumulate",
+        "tile/fixed_f32_max_accumulate",
+    )
+    assert "vector.reduction" not in source
+    assert "arith.cmpf ogt" in source

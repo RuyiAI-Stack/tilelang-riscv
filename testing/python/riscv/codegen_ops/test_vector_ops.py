@@ -864,3 +864,52 @@ def multi_ramp_probe(A: T.Buffer((4, 4), "float32"), B: T.Buffer((4, 4), "float3
     with pytest.raises(Exception):
         build_mlir_from_source(source, "multi_ramp_probe")
     assert "Only the last index of a buffer access may be a vector type" in capfd.readouterr().err
+
+
+def test_fixed_vector_mask_logic_and_select_codegen():
+    source = """
+# from tvm.script import tir as T
+@T.prim_func
+def vector_mask_logic(
+    A: T.Buffer((1,), "float32x4"),
+    B: T.Buffer((1,), "float32x4"),
+    M: T.Buffer((1,), "int32x4"),
+    N: T.Buffer((1,), "int32x4"),
+    O: T.Buffer((1,), "float32x4"),
+):
+    O[0] = T.Select(
+        T.Not(T.And(M[0] > T.Broadcast(0, 4), N[0] > T.Broadcast(0, 4))),
+        A[0],
+        T.Select(
+            T.Or(M[0] > T.Broadcast(0, 4), N[0] > T.Broadcast(0, 4)),
+            B[0],
+            A[0],
+        ),
+    )
+"""
+
+    mlir = lower_source_to_mlir(source, "vector_mask_logic", "vector/mask_logic")
+    assert_contains_all(
+        mlir,
+        (
+            "vector<4xi1>",
+            "arith.cmpi sgt",
+            "arith.andi",
+            "arith.ori",
+            "arith.xori",
+            "vector.broadcast",
+            "arith.select",
+        ),
+    )
+
+
+def test_scalar_select_condition_regression():
+    source = """
+# from tvm.script import tir as T
+@T.prim_func
+def scalar_select_condition(A: T.Buffer((1,), "float32"), B: T.Buffer((1,), "float32")):
+    B[0] = T.Select(A[0] > T.float32(0), A[0], T.float32(0))
+"""
+
+    mlir = lower_source_to_mlir(source, "scalar_select_condition", "vector/scalar_select")
+    assert "scf.if" in mlir
