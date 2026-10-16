@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
-from ._harness import compile_tileops_jit, get_kernel_class
+from ._harness import compile_tileops_jit
 
 
 def _reference(
@@ -29,30 +30,12 @@ def _reference(
 
 def test_gqa_decode_no_split_float32_runtime_compare():
     batch, heads, groups, seqlen_kv, dim = 1, 2, 1, 8, 16
-    kernel_cls = get_kernel_class("attention.gqa_decode", "GQADecodeKernel")
-    tileops_kernel = kernel_cls(
-        batch=batch,
-        heads=heads,
-        heads_kv=groups,
-        seq_len_kv=seqlen_kv,
-        dim=dim,
-        dtype=torch.float32,
-        config={
-            "block_H": 2,
-            "block_N": 8,
-            "num_split": 2,
-            "num_stages": 1,
-            "threads": 128,
-        },
-    )
-    no_split_config = {
-        key: value for key, value in tileops_kernel.config.items() if key != "num_split"
-    }
-    kernel = compile_tileops_jit(tileops_kernel.no_split_jit, no_split_config)
+    from tileops.kernels.attention.gqa.decode import gqa_decode_no_split_kernel
 
-    q = torch.linspace(-0.5, 0.5, batch * heads * dim, dtype=torch.float32).reshape(
-        batch, heads, dim
-    )
+    factory = gqa_decode_no_split_kernel(batch, heads, groups, dim, None, 0.0, "float32")
+    kernel = compile_tileops_jit(factory, dict(block_H=2, block_N=8, num_stages=1, threads=128))
+
+    q = torch.linspace(-0.5, 0.5, batch * heads * dim, dtype=torch.float32).reshape(batch, heads, dim)
     k = torch.linspace(
         -0.4,
         0.4,
@@ -69,3 +52,33 @@ def test_gqa_decode_no_split_float32_runtime_compare():
     actual = kernel(q, k, v)
     expected = _reference(q, k, v, seqlen_kv, groups)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("seqlen_kv", [63, 65])
+def test_gqa_decode_d256_runtime_compare(dtype, seqlen_kv):
+    """Exercise the original D=256 dense-decode kernel across a KV tile tail."""
+    from tileops.kernels.attention.gqa.decode import (
+        GQADecodeKernel,
+        gqa_decode_no_split_kernel,
+    )
+
+    assert GQADecodeKernel._limit_refusal(256, seqlen_kv, 80) is None
+    batch, heads, groups, dim = 1, 2, 1, 256
+    torch.manual_seed(2026)
+    q = (torch.randn(batch, heads, dim) * 0.2).to(dtype)
+    k = (torch.randn(batch, seqlen_kv, groups, dim) * 0.2).to(dtype)
+    v = (torch.randn_like(k.float()) * 0.2).to(dtype)
+    originals = [tensor.clone() for tensor in (q, k, v)]
+
+    factory = gqa_decode_no_split_kernel(batch, heads, groups, dim, None, 0.0, str(dtype).split(".")[-1])
+    kernel = compile_tileops_jit(factory, dict(block_H=2, block_N=64, num_stages=1, threads=128))
+    try:
+        actual = kernel(q, k, v)
+    finally:
+        kernel.close()
+
+    expected = _reference(q, k, v, seqlen_kv, groups).to(dtype)
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-3)
+    for tensor, original in zip((q, k, v), originals):
+        torch.testing.assert_close(tensor, original, rtol=0, atol=0)

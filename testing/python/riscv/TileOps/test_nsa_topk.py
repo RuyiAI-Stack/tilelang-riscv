@@ -34,8 +34,8 @@ def _reference(
                     imp = 0.0
                     for g in range(groups):
                         imp += torch.exp(hist_scores[g][c] - b_lse[g]).item()
-                    scores.append((imp, c))
-            scores.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                    scores.append((float(groups) if c in (0, curr - 1) else imp, c))
+            scores.sort(key=lambda item: (-item[0], item[1]))
             chosen = [idx for _, idx in scores[:selected_block_num]]
             chosen.extend([-1] * (selected_block_num - len(chosen)))
             out[t, kvh] = torch.tensor(chosen[:selected_block_num], dtype=torch.int32)
@@ -43,15 +43,15 @@ def _reference(
 
 
 def test_nsa_topk_varlen_float32_runtime_compare():
-    seq_num, c_seq_len, heads = 1, 4, 2
+    seq_num, c_seq_len, heads = 1, 16, 2
     dim = 16
     chunk_num, groups = 2, 2
-    block_size = bc = bs = 2
+    block_size = bc = bs = 8
     scale = dim**-0.5
     selected_block_num = 2
     kv_group = heads // groups
 
-    kernel_cls = get_kernel_class("attention.deepseek_nsa_topk", "NSATopkVarlenKernel")
+    kernel_cls = get_kernel_class("attention.deepseek_nsa_topk", "NSATopKVarlenKernel")
     tileops_kernel = kernel_cls(
         seq_num,
         c_seq_len,
@@ -68,20 +68,17 @@ def test_nsa_topk_varlen_float32_runtime_compare():
         config={"threads": 32},
     )
 
-    q = torch.linspace(-0.5, 0.5, c_seq_len * heads * dim, dtype=torch.float32).reshape(
-        c_seq_len, heads, dim
-    )
+    q = torch.linspace(-0.5, 0.5, c_seq_len * heads * dim, dtype=torch.float32).reshape(c_seq_len, heads, dim)
     k_cmp = torch.linspace(
         -0.4,
         0.4,
         chunk_num * kv_group * dim,
         dtype=torch.float32,
     ).reshape(chunk_num, kv_group, dim)
-    lse_in = torch.zeros(c_seq_len, heads, dtype=torch.float32)
     offsets = torch.tensor([0, c_seq_len], dtype=torch.int32)
     chunk_offsets = torch.tensor([0, chunk_num], dtype=torch.int32)
-    token_indices = torch.tensor([[0, 0], [0, 1], [0, 2], [0, 3]], dtype=torch.int32)
+    token_indices = torch.stack((torch.zeros(c_seq_len, dtype=torch.int32), torch.arange(c_seq_len, dtype=torch.int32)), dim=1)
 
-    actual = tileops_kernel(q, k_cmp, lse_in, offsets, chunk_offsets, token_indices)
+    actual = tileops_kernel(q, k_cmp, offsets, chunk_offsets, token_indices)
     expected = _reference(q, k_cmp, block_size, groups, scale, selected_block_num)
     torch.testing.assert_close(actual, expected)

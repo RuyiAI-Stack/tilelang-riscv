@@ -27,7 +27,7 @@ def test_mhc_pre_float32_serial_runtime_compare():
         torch.float32,
         config={"block_x_b": 1, "block_C": 2, "num_stages": 1, "threads": 1},
     )
-    actual_res, actual_layer = tileops_kernel(
+    actual_res, actual_layer, actual_post = tileops_kernel(
         phi,
         x,
         bias,
@@ -41,11 +41,10 @@ def test_mhc_pre_float32_serial_runtime_compare():
     norm = torch.sqrt((x * x).sum(dim=1)) / math.sqrt(n_expand * c_x) + 0.0001
     h = x.float() @ phi
     h_pre = torch.sigmoid(alpha_pre * h[:, :n_expand] / norm[:, None] + bias[:n_expand])
+    expected_post = 2 * torch.sigmoid(alpha_post * h[:, n_expand : 2 * n_expand] / norm[:, None] + bias[n_expand : 2 * n_expand])
+    torch.testing.assert_close(actual_post, expected_post, rtol=1e-4, atol=1e-4)
     h_res = h[:, 2 * n_expand :].reshape(batch, n_expand, n_expand)
-    h_res = (
-        alpha_res * h_res / norm[:, None, None]
-        + bias[2 * n_expand :].reshape(n_expand, n_expand)
-    )
+    h_res = alpha_res * h_res / norm[:, None, None] + bias[2 * n_expand :].reshape(n_expand, n_expand)
     h_res = torch.exp(h_res - h_res.max(dim=-1, keepdim=True).values)
     for _ in range(sinkhorn_repeat):
         h_res = h_res / (h_res.sum(dim=-1, keepdim=True) + sinkhorn_eps)

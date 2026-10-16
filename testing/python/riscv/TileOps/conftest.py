@@ -38,26 +38,32 @@ def _maybe_set_llvm_root() -> Path | None:
 
 
 def _apply_tileops_test_overrides() -> None:
-    import torch
+    from ._harness import (
+        _ensure_minimal_tileops_kernel_modules,
+        _ensure_tvm_tirx_shim,
+        _ensure_torch_library_custom_op_shim,
+    )
 
-    if not hasattr(torch.library, "custom_op"):
-        class _CustomOpShim:
-            def __init__(self, fn):
-                self.fn = fn
+    _ensure_tvm_tirx_shim()
+    _ensure_torch_library_custom_op_shim()
+    # TileLang 0.1.12 moved the CUDA macro package. Reuse this checkout's
+    # implementation for imports; this does not provide a different kernel.
+    import importlib
+    import types
 
-            def __call__(self, *args, **kwargs):
-                return self.fn(*args, **kwargs)
-
-            def register_fake(self, fn):
-                return fn
-
-        def _custom_op(_name, mutates_args=()):  # noqa: ARG001
-            def decorator(fn):
-                return _CustomOpShim(fn)
-
-            return decorator
-
-        torch.library.custom_op = _custom_op  # type: ignore[attr-defined]
+    for name in ("tilelang.cuda", "tilelang.cuda.intrinsics", "tilelang.cuda.intrinsics.macro"):
+        if name not in sys.modules:
+            package = types.ModuleType(name)
+            package.__path__ = []
+            sys.modules[name] = package
+    sys.modules.setdefault(
+        "tilelang.cuda.intrinsics.macro.wgmma_macro_generator",
+        importlib.import_module("tilelang.intrinsics.wgmma_macro_generator"),
+    )
+    # Install schedule metadata before any test imports upstream modules by
+    # their direct paths. Otherwise their from-imports capture real CUDA probes
+    # and a focused run behaves differently from collection of the full suite.
+    _ensure_minimal_tileops_kernel_modules()
 
 
 if not TILEOPS_ROOT.exists():

@@ -6,8 +6,8 @@ from ._harness import compile_tileops_jit, get_kernel_class
 
 
 def test_bmm_fp8_float32_runtime_compare() -> None:
-    module_cls = get_kernel_class("bmm", "BmmFp8Kernel")
-    # The public BmmFp8Kernel constructor checks for CUDA SM90 before selecting
+    module_cls = get_kernel_class("bmm", "BmmFP8Kernel")
+    # The public BmmFP8Kernel constructor checks for CUDA SM90 before selecting
     # a kernel. Compile the underlying TileLang factory directly so the RISC-V
     # backend tests the implementation rather than the CUDA dispatch guard.
     del module_cls
@@ -33,13 +33,11 @@ def test_bmm_fp8_float32_runtime_compare() -> None:
 
 
 def test_gemm_fp8_per_tensor_float32_runtime_compare() -> None:
-    module_cls = get_kernel_class("gemm", "GemmFp8EpilogueKernel")
+    module_cls = get_kernel_class("gemm", "GemmFP8TensorScaleKernel")
     del module_cls
     module = __import__("tileops.kernels.gemm.dense", fromlist=["_gemm_fp8_kernel"])
     m, n, k = 4, 4, 32
-    jit_kernel = module._gemm_fp8_kernel(
-        m, n, k, "float8_e4m3fn", "float32", block_scaled=False
-    )
+    jit_kernel = module._gemm_fp8_kernel(m, n, k, "float8_e4m3fn", "float32", block_scaled=False)
     kernel = compile_tileops_jit(
         jit_kernel,
         {"block_m": 4, "block_n": 4, "block_k": 32, "num_stages": 1, "threads": 128},
@@ -59,13 +57,11 @@ def test_gemm_fp8_per_tensor_float32_runtime_compare() -> None:
 
 
 def test_gemm_fp8_block_scaled_float32_runtime_compare() -> None:
-    module_cls = get_kernel_class("gemm", "GemmFp8BlockScaledKernel")
+    module_cls = get_kernel_class("gemm", "GemmFP8BlockScaleKernel")
     del module_cls
     module = __import__("tileops.kernels.gemm.dense", fromlist=["_gemm_fp8_kernel"])
     m, n, k = 8, 8, 128
-    jit_kernel = module._gemm_fp8_kernel(
-        m, n, k, "float8_e4m3fn", "float32", block_scaled=True
-    )
+    jit_kernel = module._gemm_fp8_kernel(m, n, k, "float8_e4m3fn", "float32", block_scaled=True)
     kernel = compile_tileops_jit(
         jit_kernel,
         {"block_m": 8, "block_n": 8, "block_k": 128, "num_stages": 1, "threads": 128},
@@ -86,10 +82,8 @@ def test_gemm_fp8_block_scaled_float32_runtime_compare() -> None:
 
 def test_gqa_paged_fp8_kv_cache_runtime_compare() -> None:
     get_kernel_class("attention.gqa_fwd", "GQAPrefillPagedWithFP8KVCacheFwdKernel")
-    module = __import__("tileops.kernels.attention.gqa_fwd", fromlist=["_unused"])
-    jit_kernel = module._gqa_prefill_paged_with_fp8_kv_cache_fwd_kernel(
-        1, 2, 1, 2, 4, 2, 2, 16, False, 16**-0.5, 0.0, "float16"
-    )
+    module = __import__("tileops.kernels.attention.gqa.prefill_paged_kv_append", fromlist=["_unused"])
+    jit_kernel = module._gqa_prefill_paged_with_fp8_kv_cache_fwd_kernel(1, 2, 1, 2, 4, 2, 2, 16, False, 16**-0.5, 0.0, "float16")
     kernel = compile_tileops_jit(
         jit_kernel,
         {"block_m": 2, "block_n": 2, "num_stages": 1, "threads": 128},

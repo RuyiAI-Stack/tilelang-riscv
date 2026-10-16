@@ -1,119 +1,117 @@
-# RISC-V TileOps Tests
+# RISC-V TileOps tests
 
-This directory contains SG2044 runtime correctness tests for TileOps kernels
-compiled through TileLang's RISC-V MLIR backend.
+This suite compiles original upstream TileOps programs through the RISC-V MLIR
+backend and compares selected executions with independent PyTorch references.
+The pinned revision is `67250e8172fa4a97c3ab7cb5b6c269169f12299b` (2026-10-16).
+Upstream source is unmodified.
 
-The tests intentionally load only the TileOps kernel modules needed by each
-case. This avoids importing TileOps' CUDA-facing package entry points while
-still validating the actual TileOps TileLang kernels on RISC-V.
+## Adaptation boundary
 
-## Current Coverage
+TileOps owns operator contracts, algorithms, compositions and kernel selection.
+TileLang owns language semantics, lowering and runtime execution. Tests use the
+upstream algorithms and rely on general compiler/runtime support. Current GDN
+decode and prefill tests replace the removed upstream GatedDeltaNet interfaces.
 
-- `test_elementwise_activations.py`: float32 unary elementwise activation and
-  math kernels.
-- `test_elementwise_arithmetic.py`: float32 binary elementwise arithmetic
-  kernels.
-- `test_elementwise_fused_gated.py`: float32 fused gated elementwise kernels.
-- `test_elementwise_parametric.py`: float32 parametric elementwise kernels,
-  including scalar/tensor clamp variants, tensor lerp, and PReLU.
-- `test_elementwise_misc.py`: float32 comparisons, logical operations,
-  predicates, positional encodings, where/masked-fill, and int32 bitwise operations.
-- `test_bmm.py`: batched matrix multiplication kernel.
-- `test_convolution.py`: 1D/2D/3D convolution, bias, pointwise/1x1/symmetric,
-  and depthwise group-convolution kernels.
-- `test_deltanet_fused_prepare.py`: DeltaNet fused prepare/compute-w-u sub-kernel.
-- `test_deltanet_compute_w_u_bwd.py`: DeltaNet compute-w-u backward sub-kernel.
-- `test_deltanet_bwd.py`: complete DeltaNet backward pipeline with autograd reference comparison.
-- `test_deltanet_fwd.py`: DeltaNet forward wrapper and output sub-kernel.
-- `test_deltanet_h_recurrence.py`: DeltaNet forward recurrence sub-kernel.
-- `test_engram.py`: Engram GateConv forward fusion kernel.
-- `test_engram_bwd.py`: Engram GateConv backward kernel.
-- `test_gated_deltanet_fwd.py`: Gated DeltaNet forward wrapper and output sub-kernel.
-- `test_gated_deltanet_fused_prepare.py`: Gated DeltaNet fused prepare/compute-w-u sub-kernel.
-- `test_gated_deltanet_compute_w_u_bwd.py`: Gated DeltaNet compute-w-u backward sub-kernel.
-- `test_gated_deltanet_bwd.py`: complete Gated DeltaNet backward pipeline with autograd reference comparison.
-- `test_gated_deltanet_h_recurrence.py`: Gated DeltaNet forward recurrence sub-kernel.
-- `test_gated_deltanet_prefill.py`: Gated DeltaNet prefill sub-kernels and public BTHD path.
-- `test_engram_decode.py`: Engram single-token decode fusion kernel.
-- `test_deltanet_recurrence.py`: DeltaNet single-step decode recurrence kernels,
-  including the shuffle-based raw decode variant.
-- `test_gated_deltanet_recurrence.py`: Gated DeltaNet single-step decode recurrence
-  kernels, including the shuffle-based raw decode variant.
-- `test_gla_decode.py`: GLA single-step decode recurrence kernels.
-- `test_gla_fwd.py`: GLA gate precompute and complete H/O forward pipeline.
-- `test_gla_bwd.py`: fused GLA backward kernel with inter-chunk state gradients
-  and autograd reference comparison.
-- `test_mha_decode.py`: MHA no-split attention decode kernel.
-- `test_mha_decode_paged.py`: MHA paged attention decode kernel.
-- `test_mha_bwd.py`: MHA backward kernel with dq/dk/dv runtime comparison.
-- `test_gqa_decode.py`: GQA no-split attention decode kernel.
-- `test_gqa_decode_bs1.py`: GQA batch-1 short-context decode wrapper.
-- `test_gqa_decode_paged.py`: GQA paged no-split attention decode kernel.
-- `test_gqa_bwd_postprocess.py`: FlashAttention backward preprocess and postprocess kernels.
-- `test_gqa_bwd.py`: GQA backward kernel with dq/dk/dv runtime comparison.
-- `test_gqa_fwd.py`: MHA/GQA non-causal attention forward kernels.
-- `test_gqa_prefill_fwd.py`: GQA prefill attention forward kernel.
-- `test_gqa_prefill_paged_kvcache_fwd.py`: paged GQA prefill-with-KV-cache kernel.
-- `test_gqa_prefill_paged_kvcache_rope_append.py`: paged RoPE KV-cache append kernel.
-- `test_gqa_prefill_paged_kvcache_rope_fwd.py`: paged GQA prefill-with-KV-cache RoPE kernel.
-- `test_gqa_prefill_varlen_fwd.py`: packed variable-length GQA prefill forward kernel.
-- `test_gqa_sliding_window_fwd.py`: GQA sliding-window attention forward kernel.
-- `test_gqa_sliding_window_varlen_fwd.py`: packed variable-length GQA sliding-window attention kernel.
-- `test_mla_decode.py`: DeepSeek MLA no-split attention decode kernel.
-- `test_nsa_cmp_fwd.py`: DeepSeek NSA comparison forward kernel.
-- `test_nsa_fwd.py`: DeepSeek NSA sparse attention forward kernel.
-- `test_nsa_topk.py`: DeepSeek NSA variable-length top-k block selector.
-- `test_sparse_mla.py`: portable DeepSeek sparse-MLA decode kernel.
-- `test_grouped_gemm.py`: grouped GEMM kernel.
-- `test_fp8.py`: FP8 BMM/GEMM and paged FP8 KV-cache kernels.
-- `test_fp8_lightning_indexer.py`: FP8 Lightning Indexer kernel.
-- `test_topk_selector.py`: top-k selector kernel.
-- `test_norm.py`: float32 row-wise normalization kernels, including LayerNorm,
-  RMSNorm, GroupNorm, no-affine GroupNorm, fused-add norm, AdaLN, InstanceNorm,
-  and BatchNorm variants.
-- `test_pool.py`: float32 avg/max pooling kernels, including spatial fast paths
-  and max-pool indices output.
-- `test_reduction.py`: float32 sum, mean, min/max, product, variance, standard
-  deviation, variance-with-mean, softmax, vector norm, logical reduction, and
-  arg-reduction, logsumexp, and cumulative kernels.
-- `test_dropout_rope.py`: deterministic float32 dropout and NeoX/non-NeoX RoPE
-  kernels.
-- `test_mhc.py`: MHC pre/post-processing tensor fusion kernels, using the
-  currently supported serial RISC-V configuration for MHC pre.
-- `test_cb_producer.py`: causal CB matrix producer kernel.
-- `test_mamba.py`: Mamba dA cumulative-sum kernel.
-- `test_moe_grouped_gemm.py`: MoE grouped-GEMM kernel selection and call specification.
-- `test_moe_permute_align.py`: MoE token-to-expert alignment kernel.
-- `test_moe_permute_nopad.py`: MoE no-pad token permutation kernel.
-- `test_moe_shared_expert_mlp.py`: shared-expert fused SiLU-and-multiply kernel.
-- `test_moe_unpermute.py`: MoE weighted unpermute kernel.
-- `test_fused_topk.py`: softmax routing and sigmoid correction-bias routing.
-- `test_fft.py`: complex64 FFT C2C shared-memory butterfly kernel.
-- `test_ssd_chunk_scan.py`: Mamba SSD fused chunk output scan kernel.
-- `test_ssd_chunk_state.py`: Mamba SSD chunk-state accumulation kernel.
-- `test_ssd_decode.py`: Mamba SSD recurrent decode kernel, using the currently
-  supported serial RISC-V configuration.
-- `test_ssd_state_passing.py`: Mamba SSD inter-chunk state-passing kernel.
-- `test_mean_pooling.py`: attention mean-pooling kernel.
+The harness fixes schedules and handles import/API differences: a `tvm.tirx`
+alias, a moved CUDA macro import alias, an eager-only custom-op decorator on
+older PyTorch, and fixed GPU schedule-selection metadata. It bypasses CUDA
+architecture classification when testing original programs on RISC-V. These
+are test accommodations, not a shipped backend, device detector, or replacement
+operator math. Unsupported constructs must fail in the compiler.
 
-## Run
+Upstream declares PyTorch `>=2.13,<2.14` and TileLang `0.1.12`; the development
+host uses PyTorch 2.12 and SG2044 uses 2.1. These tests do not certify a standard
+installation, `torch.compile`, or every public Op interface in those environments.
+
+## New upstream execution coverage
+
+| Test | Scope |
+| --- | --- |
+| `test_gqa_decode.py` | Original dense GQA decode with D=256, FP16/BF16 and KV lengths 63/65; independent reference and input-preservation checks |
+| `test_upstream_attention.py` | Original MLA MMA (FP16/BF16, split 1/2, sequence tails); varlen and paged GQA (FP16/BF16, causal/noncausal, uneven lengths and nonmonotonic pages) |
+| `test_gqa_paged_features.py` | 16 original general paged GQA cases: FP16/BF16, one/three splits, NeoX/interleaved RoPE, windows, softcap and raw sinks; dynamic metadata reuse, empty requests, poisoned cache padding and bytewise input-preservation checks |
+| `test_upstream_gdn.py` | Original GDN decode and prefill, both state layouts and precisions, output/state/no-mutation checks; prefill lengths 5/67 cover short input and a chunk tail |
+| `test_moe_grouped_gemm.py` | Original MMA grouped GEMM, 5 layouts × 2 precisions × 3 activations; empty experts, caller-owned output and repeated calls |
+| `test_upstream_public_api.py` | Real `GQAVarlenFwdOp(target="riscv")` with a scoped upstream builder, 8 varlen cases with optional sinks plus 4 original gather orchestration cases with strided destination storage; scoped registration and cache reuse |
+| `test_gqa_sliding_window_varlen_fwd.py` | Original varlen sliding-window attention executes with uneven Q/KV lengths, window masking and input-preservation checks |
+| `test_gemm.py` | Original W4A16 MMA, FP16/BF16, independently packed INT4 weights and numerical dequantization/GEMM reference |
+| `test_paged_cache_gather.py` | 9 original gather cases: FP16/BF16/FP8, scalar and multidimensional rows, dynamic packed ranges/page pools, row/column tails, empty requests, all FP8 encodings and bit-exact outputs |
+| `test_paged_kv_cache_write.py` | Original paged KV cache scatter, 10 cases: FP16/BF16 inputs, 16-bit/FP8 cache, dynamic tokens, ragged schedules, repeated writes, skipped slots, empty launch and byte-exact FP8 boundary checks |
+| `test_ada_layer_norm_zero.py`, `test_int8_dequant.py` | AdaLayerNormZero and INT8 per-channel/per-block dequantization, FP16/BF16/FP32 |
+| `test_fp8_quant_per_block.py` | Original unaligned FP8 block quantization, FP16/BF16/FP32, ragged tiles, random/zero/tiny values; exact output and scale checks |
+| `test_sampling_*.py`, `test_chain_speculative_sampling.py` | Min-P, Top-K, Top-P, Top-K+Top-P, probability and speculative sampling; ragged vocabulary, 32/64-thread schedules, independent Philox/acceptance/CDF reference |
+| `test_delta_decode.py` | DeltaNet and KDA decode, FP16/BF16, optional Q/K normalization, recurrence output/state and input-preservation checks |
+
+The paged GQA tests exercise RoPE, windows and sinks against independent FP64
+references. The cache-write and gather tests preserve upstream flattening,
+optional-argument handling and in-place output semantics; FP8 conversion tests
+include every encoding and precision boundaries. Gather public-Op tests retain
+upstream staging/copy-back for strided destination views. Only compilation and
+host kernel selection are rebound within the tests.
+
+The public varlen builder connects tensor metadata and the original kernel factory.
+Registration is isolated to tests; general public backend registration is not
+shipped. The tested attention contract includes optional sinks and 16-bit data
+without RoPE, optional scales, custom score parameters or sliding windows.
+
+Existing tests were migrated to current module/class names, factory signatures
+and tensor layouts, including DeltaNet/GLA chunks, dense/paged attention,
+normalization, reductions, RoPE, MoE, pooling and convolution. Mamba2 and composite
+MoE retain component coverage, not full current-public-Op acceptance.
+
+## Acceptance and gaps
+
+October 16 host results at `67250e81`: **415 passed**, with no skips or expected
+failures: **400 kernel/component numerical cases, 12 public-API numerical cases,
+and 3 rejection checks**. That is **412 numerical executions and zero
+compile-only cases**.
+These are parameterized test counts, not supported-operator counts. Separate
+backend/TileKernels regressions and cache reload are reported in
+[RISC-V test suite](../README.md#validation-scope).
+
+The current pin and compiler changes have not been rerun on SG2044.
+
+| Gap | Evidence retained |
+| --- | --- |
+| W4A16 WGMMA variant | 2 tests require rejection of `tileops::w4a16_dequant_word`; original MMA FP16/BF16 has numerical coverage |
+| MLA warp-specialized variant | Rejects `tileops::uniform_wgmma_bases`; numerical MLA coverage uses original MMA |
+| Paged GQA | General FP16/BF16 RoPE/window/sink and split numerics are covered; WS RoPE preparation, FP8 and public dispatch remain unvalidated |
+| Quantization vector loads | INT8 quantization, SmoothQuant, INT8 per-tensor dequantization and aligned FP8 use CUDA-specific load helpers; INT4 also needs packed reinterpret support |
+| Sigmoid | FP32 generic-load numerics pass at 257 elements; aligned register-copy uses `tileops::load16_evict_last`, while FP16/BF16 use unsupported `__fdividef` |
+| Sampling and decode breadth | Selected scalar-load sampling schedules and decode paths are validated; packed/vector/cluster variants and full prefill compositions remain gaps |
+| KDA prefill | Decode numerics pass; default 256-thread chunk-prepare overflows the host stack, while a 32-thread prepare/scan run yields incorrect output and state, so no prefill numerical support is claimed |
+
+No expected-failure markers remain in this suite. Rejection checks are not
+numerical support. There are **20 unmapped declarations**:
+**7 implemented upstream and 13 spec-only**. The inventory now has 176 kernel
+references and 9 component references; these do not certify full Op contracts.
+
+## Inventory and reproduction
+
+The manifest now lives in `src/tileops/manifest/spec`: **205 operators, 191
+implemented and 14 spec-only**. `types.yaml` defines types, not another operator.
+Upstream defines spec-only as no fully conforming implementation yet; partial
+code may exist. It says nothing about this RISC-V suite's execution status.
+For example, paged GQA retains that metadata while its 16-bit kernels have local
+numerical evidence.
+
+`operator_inventory.py` reads current declarations, inheritance and delegates
+without importing CUDA. It rejects empty/changed schemas and stale references,
+and preserves upstream status independently of observed test outcomes. Per-entry
+results can overlap and mixed test files can contain other operators; references
+do not certify all shapes, dtypes or variants.
 
 ```bash
-python -m pytest -q testing/python/riscv/TileOps
+TVM_FFI_DISABLE_TORCH_C_DLPACK=1 TILELANG_DISABLE_CACHE=1 \
+TILELANG_RISCV_MLIR_MODE=ON \
+python -m pytest -q -rx testing/python/riscv/TileOps --junitxml=tileops.xml
+
+python testing/python/riscv/operator_inventory.py \
+  --check --junit tileops.xml --output tileops-inventory.json
 ```
 
-The default TileOps checkout is `3rdparty/TileOPs`. Set `TILEOPS_ROOT` to use a
-different checkout.
-
-At TileOps commit `e92bcbf7`, its manifest contains 175 implemented operators
-and 3 `spec-only` contracts. The tests here exercise the kernel layer directly;
-one generalized kernel may serve multiple manifest operators.
-
-## Architecture Notes
-
-TileOps now provides `SparseMlaBasicKernel`, a plain-`T.gemm` fallback for
-DeepSeek sparse-attention decode; `test_sparse_mla.py` validates it numerically
-through the RISC-V backend. The Hopper `SparseMlaKernel` remains WGMMA-specific.
-Likewise, the SM90 sliding-window GQA and MLA implementations are covered as
-RISC-V lowering/compilation tests where their warp-group execution model cannot
-be reproduced by the current serial RISC-V runtime.
+Use a development Python with the built RISC-V adapter and set
+`TILELANG_RISCV_LLVM_ROOT` to the LLVM/MLIR toolchain. The default source checkout
+is `3rdparty/TileOPs`; `TILEOPS_ROOT` can select another checkout but then counts
+and mappings must be revalidated. `--check` validates inventory structure and
+references; `--require-tileops-numerical` intentionally fails while gaps remain.

@@ -9,9 +9,7 @@ from ._harness import get_kernel_class
 
 def test_moe_pre_permute_contiguous_float32_runtime_compare():
     num_tokens, top_k, num_experts, hidden_size = 2, 2, 4, 8
-    kernel_cls = get_kernel_class(
-        "moe.permute_contiguous", "MoePrePermuteContiguousKernel"
-    )
+    kernel_cls = get_kernel_class("moe.permute_contiguous", "MoEPrePermuteContiguousKernel")
     call_spec = __import__("tileops.kernels.moe.call_spec", fromlist=["PrePermuteCall"])
     call = call_spec.PrePermuteCall(
         arch=90,

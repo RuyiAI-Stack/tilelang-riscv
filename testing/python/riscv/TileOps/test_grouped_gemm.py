@@ -34,8 +34,7 @@ def test_grouped_gemm_nt_float32_runtime_compare():
     B = torch.linspace(-0.4, 0.4, batch_count * N * K, dtype=torch.float32).reshape(batch_count, N, K)
     batch_sizes = torch.tensor([1, 1], dtype=torch.int32)
     batch_offsets = torch.tensor([0, 1], dtype=torch.int32)
-    batch_padded_offsets = torch.tensor([0, 1], dtype=torch.int32)
 
-    actual = tileops_kernel(A, B, batch_sizes, batch_offsets, batch_padded_offsets)
+    actual = tileops_kernel(A, B, batch_sizes, batch_offsets)
     expected = _reference(A, B, batch_sizes, batch_offsets)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)

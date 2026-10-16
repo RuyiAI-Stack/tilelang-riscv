@@ -33,9 +33,7 @@ def _ensure_tvm_tirx_shim() -> None:
 
     sys.modules.setdefault("tvm.tirx", tvm.tir)
     sys.modules.setdefault("tvm.tirx.op", importlib.import_module("tvm.tir.op"))
-    sys.modules.setdefault(
-        "tvm.tirx.stmt_functor", importlib.import_module("tvm.tir.stmt_functor")
-    )
+    sys.modules.setdefault("tvm.tirx.stmt_functor", importlib.import_module("tvm.tir.stmt_functor"))
     if not hasattr(tvm, "tirx"):
         tvm.tirx = tvm.tir
 
@@ -66,15 +64,17 @@ def _load_module(module_name: str, file_path: Path):
     if not file_path.is_file():
         legacy_prefixes = {
             "tileops.kernels.deltanet.": "tileops.kernels.linear_attention.deltanet.",
-            "tileops.kernels.gated_deltanet.": (
-                "tileops.kernels.linear_attention.gated_deltanet."
-            ),
+            "tileops.kernels.gated_deltanet.": ("tileops.kernels.linear_attention.gated_deltanet."),
             "tileops.kernels.gla.": "tileops.kernels.linear_attention.gla.",
         }
         for old_prefix, new_prefix in legacy_prefixes.items():
             if module_name.startswith(old_prefix):
                 module_name = new_prefix + module_name.removeprefix(old_prefix)
                 break
+        module_name = module_name.replace(".deltanet.deltanet_fwd", ".deltanet.chunk_fwd")
+        module_name = module_name.replace(".deltanet.deltanet_bwd", ".deltanet.chunk_bwd")
+        module_name = module_name.replace(".gla.gla_fwd", ".gla.chunk_fwd")
+        module_name = module_name.replace(".gla.gla_bwd", ".gla.chunk_bwd")
         return importlib.import_module(module_name)
     existing = sys.modules.get(module_name)
     if existing is not None:
@@ -95,6 +95,9 @@ def _ensure_minimal_tileops_kernel_modules():
     utils = importlib.import_module("tileops.utils")
     utils.get_sm_version = lambda _index=None: 80
     utils.get_sm_count = lambda _index=None: 1
+    # Fix the schedule-selection budget for direct kernel tests. No device
+    # allocation or CUDA execution is permitted by this harness.
+    utils.get_shared_memory_optin = lambda _index=None: 98304
     kernel_base = importlib.import_module("tileops.kernels.kernel_base")
     # ``supported_archs`` describes CUDA SM compatibility. It cannot classify
     # a non-CUDA backend, so RISC-V lowering tests validate the generated TIR
@@ -399,13 +402,15 @@ def run_unary_runtime_compare(
     config = None
     if "strategy" in kernel_kwargs:
         config = {"strategy": kernel_kwargs.pop("strategy")}
-    tileops_kernel = kernel_cls(
-        N_total=x.numel(), dtype=x.dtype, config=config, **kernel_kwargs
-    )
+    tileops_kernel = kernel_cls(N_total=x.numel(), dtype=x.dtype, config=config, **kernel_kwargs)
     kernel = compile_tileops_kernel(tileops_kernel)
     actual = kernel(x.contiguous().reshape(-1))
 
     expected = reference(x).reshape(-1)
+    # Upstream predicate kernels use byte storage; their public wrappers expose bool.
+    if expected.dtype == torch.bool and actual.dtype == torch.int8:
+        assert torch.all((actual == 0) | (actual == 1))
+        actual = actual.bool()
     torch.testing.assert_close(actual.reshape(expected.shape), expected, rtol=rtol, atol=atol)
 
 

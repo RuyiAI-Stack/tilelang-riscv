@@ -29,7 +29,7 @@ The main focus of this repository is:
 - a `target="riscv"` backend for TileLang
 - TIR to structured MLIR lowering
 - native RISC-V host-library generation and execution
-- compatibility with TileLang operator implementations and TileKernels
+- compatibility with TileLang operator implementations, TileOps and TileKernels
 - correctness validation on real RISC-V hardware
 
 The backend is experimental and is being developed incrementally. GPU
@@ -143,12 +143,24 @@ Run the TileKernels runtime correctness tests:
 python -m pytest -q testing/python/riscv/TileKernels
 ```
 
-The TileKernels tests compile each kernel with `target="riscv"`, execute it
-through the native RISC-V adapter, and compare its output with a CPU or
-PyTorch reference. See the [RISC-V test suite
-layout](./testing/python/riscv/README.md) for the test-group overview and
-[codegen_ops README](./testing/python/riscv/codegen_ops/README.md) for the
-synthetic code-generation tests.
+Run the TileOps runtime correctness tests:
+
+```sh
+TILELANG_DISABLE_CACHE=1 python -m pytest -q testing/python/riscv/TileOps
+```
+
+Both suites compile original upstream programs with `target="riscv"` and compare
+selected executions against independent CPU/PyTorch references. TileOps is pinned
+to `67250e81`; its suite has 415 passing checks (412 numerical cases and three
+unsupported-feature rejection checks). TileKernels is pinned to `36d9e45d`, with
+48 numerical checks and references to all 48 top-level JIT factories, including
+nine mHC backward factories. Test counts do not certify all operator variants.
+
+These October 16 results were obtained on an x86 host through the RISC-V MLIR
+adapter. The current TileOps pin and compiler changes still need SG2044 native
+validation. See the [TileOps coverage and limitations](./testing/python/riscv/TileOps/README.md),
+[TileKernels tests](./testing/python/riscv/TileKernels/README.md) and
+[RISC-V test suite](./testing/python/riscv/README.md) for reproduction instructions.
 
 ## Development
 

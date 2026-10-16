@@ -13,9 +13,7 @@ from ._harness import get_elementwise_kernel_class, run_unary_runtime_compare
         (
             "GeluTanhFwdKernel",
             lambda: torch.linspace(-4.0, 4.0, 256, dtype=torch.float32),
-            lambda value: 0.5
-            * value
-            * (1.0 + torch.tanh(0.7978845608028654 * (value + 0.044715 * value * value * value))),
+            lambda value: 0.5 * value * (1.0 + torch.tanh(0.7978845608028654 * (value + 0.044715 * value * value * value))),
             1e-5,
             1e-5,
         ),
@@ -33,7 +31,9 @@ from ._harness import get_elementwise_kernel_class, run_unary_runtime_compare
             1e-5,
             1e-5,
         ),
-        ("SigmoidFwdKernel", lambda: torch.linspace(-4.0, 4.0, 256, dtype=torch.float32), torch.sigmoid, 1e-5, 1e-5),
+        # The newest upstream sigmoid uses a CUDA-only vector load for aligned rows;
+        # this odd length exercises its generic TIR load and ragged tail on RISC-V.
+        ("SigmoidFwdKernel", lambda: torch.linspace(-4.0, 4.0, 257, dtype=torch.float32), torch.sigmoid, 1e-5, 1e-5),
         ("TanhFwdKernel", lambda: torch.linspace(-4.0, 4.0, 256, dtype=torch.float32), torch.tanh, 1e-5, 1e-5),
         (
             "SiluFwdKernel",

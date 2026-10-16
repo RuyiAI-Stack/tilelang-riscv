@@ -36,12 +36,8 @@ def _deltanet_reference(q, k, v, beta, chunk_size, grad_output):
         beta_chunk = beta_ref[:, :, start:stop]
         gram = torch.einsum("bhik,bhjk->bhij", k_chunk, k_chunk)
         transform = eye + torch.tril(beta_chunk.unsqueeze(-1) * gram, diagonal=-1)
-        w = _solve_unit_lower_triangular(
-            transform, k_chunk * beta_chunk.unsqueeze(-1)
-        )
-        u = _solve_unit_lower_triangular(
-            transform, v_chunk * beta_chunk.unsqueeze(-1)
-        )
+        w = _solve_unit_lower_triangular(transform, k_chunk * beta_chunk.unsqueeze(-1))
+        u = _solve_unit_lower_triangular(transform, v_chunk * beta_chunk.unsqueeze(-1))
         v_new = u - w @ state
         attention = (q_chunk @ k_chunk.transpose(-2, -1)) * causal
         outputs.append(q_chunk @ state + attention @ v_new)
@@ -54,8 +50,8 @@ def _deltanet_reference(q, k, v, beta, chunk_size, grad_output):
 def test_deltanet_bwd_full_float32_runtime_compare() -> None:
     batch, heads, seq_len, dim_k, dim_v, chunk_size = 1, 1, 4, 16, 16, 2
     _load_deltanet_fwd_module()
-    fwd_cls = get_kernel_class("deltanet.deltanet_fwd", "DeltaNetFwdKernel")
-    bwd_cls = get_kernel_class("deltanet.deltanet_bwd", "DeltaNetBwdKernel")
+    fwd_cls = get_kernel_class("deltanet.deltanet_fwd", "DeltaNetChunkFwdKernel")
+    bwd_cls = get_kernel_class("deltanet.deltanet_bwd", "DeltaNetChunkBwdKernel")
     config = {
         "fused_num_stages": 1,
         "fused_threads": 64,
@@ -64,9 +60,7 @@ def test_deltanet_bwd_full_float32_runtime_compare() -> None:
         "h_block_v": 16,
         "o_threads": 64,
     }
-    fwd = fwd_cls(
-        batch, heads, seq_len, chunk_size, dim_k, dim_v, torch.float32, config=config
-    )
+    fwd = fwd_cls(batch, heads, seq_len, chunk_size, dim_k, dim_v, torch.float32, config=config)
     bwd = bwd_cls(
         batch,
         heads,
@@ -83,17 +77,11 @@ def test_deltanet_bwd_full_float32_runtime_compare() -> None:
         },
     )
 
-    q = torch.linspace(-0.2, 0.2, batch * heads * seq_len * dim_k).reshape(
-        batch, heads, seq_len, dim_k
-    )
+    q = torch.linspace(-0.2, 0.2, batch * heads * seq_len * dim_k).reshape(batch, heads, seq_len, dim_k)
     k = torch.linspace(0.2, -0.2, batch * heads * seq_len * dim_k).reshape_as(q)
-    v = torch.linspace(-0.3, 0.3, batch * heads * seq_len * dim_v).reshape(
-        batch, heads, seq_len, dim_v
-    )
+    v = torch.linspace(-0.3, 0.3, batch * heads * seq_len * dim_v).reshape(batch, heads, seq_len, dim_v)
     beta = torch.tensor([[[0.25, 0.5, 0.35, 0.7]]], dtype=torch.float32)
-    grad_output = torch.linspace(
-        -0.1, 0.1, batch * heads * seq_len * dim_v
-    ).reshape_as(v)
+    grad_output = torch.linspace(-0.1, 0.1, batch * heads * seq_len * dim_v).reshape_as(v)
 
     _output, state, aw, au, w, u = fwd(q, k, v, beta)
     actual = bwd(grad_output, q, k, v, beta, state, aw, au, w, u)

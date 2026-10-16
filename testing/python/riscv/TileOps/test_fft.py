@@ -1,40 +1,20 @@
-from __future__ import annotations
+"""Exercise upstream FFT plans and their original interleaved programs."""
 
-import math
-
+import pytest
 import torch
-
-from ._harness import compile_tileops_kernel, get_kernel_class
-
-
-def _build_twiddle_lut(n: int) -> tuple[torch.Tensor, torch.Tensor]:
-    angles = torch.zeros(n - 1, dtype=torch.float64)
-    for stage in range(int(math.log2(n))):
-        half_m = 1 << stage
-        k = torch.arange(half_m, dtype=torch.float64)
-        angles[half_m - 1 : 2 * half_m - 1] = -2.0 * math.pi * k / (2 * half_m)
-    return torch.cos(angles).float(), torch.sin(angles).float()
+from ._harness import get_kernel_class
 
 
-def test_fft_c2c_complex64_shared_memory_runtime_compare():
-    n, batch = 8, 2
-    kernel_cls = get_kernel_class("fft", "FFTC2CKernel")
-    tileops_kernel = kernel_cls(n, batch, torch.complex64)
-    tileops_kernel.config = {"block_size": 4, "threads": 4}
-    kernel = compile_tileops_kernel(tileops_kernel)
-
-    x = torch.complex(
-        torch.linspace(-1.0, 1.0, batch * n).reshape(batch, n),
-        torch.linspace(1.0, -1.0, batch * n).reshape(batch, n),
-    )
-    lut_real, lut_imag = _build_twiddle_lut(n)
-
-    _, _, actual_pair = kernel(
-        x.real.contiguous(),
-        x.imag.contiguous(),
-        lut_real,
-        lut_imag,
-    )
-    actual = torch.view_as_complex(actual_pair.contiguous())
-
-    torch.testing.assert_close(actual, torch.fft.fft(x, dim=-1), rtol=1e-4, atol=1e-4)
+@pytest.mark.parametrize("n", [2, 4, 8, 16, 32])
+@pytest.mark.parametrize("dtype", [torch.complex64, torch.complex128])
+def test_fft_c2c_runtime_compare(n, dtype):
+    kernel_cls = get_kernel_class("fft", "FFTC2COneCTAKernel")
+    kernel = kernel_cls(n, dtype)
+    # Reuse one dynamic-batch kernel across partial and multiple CTAs. Random
+    # real/imaginary parts exercise both butterfly outputs independently.
+    generator = torch.Generator().manual_seed(96)
+    for batch in (2, 259):
+        x = torch.randn(batch, n, dtype=dtype, generator=generator)
+        before = x.clone()
+        torch.testing.assert_close(kernel(x), torch.fft.fft(x, dim=-1), rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(x, before, rtol=0, atol=0)

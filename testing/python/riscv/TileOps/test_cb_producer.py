@@ -8,14 +8,10 @@ from ._harness import compile_tileops_kernel, get_kernel_class
 def test_cb_producer_float16_runtime_compare():
     batch, num_chunks, n_groups, chunk_len, d_state = 1, 2, 2, 2, 4
     seq_len = num_chunks * chunk_len
-    c_mat = torch.linspace(-1.0, 1.0, batch * seq_len * n_groups * d_state, dtype=torch.float16).reshape(
-        batch, seq_len, n_groups, d_state
-    )
-    b_mat = torch.linspace(1.0, -1.0, batch * seq_len * n_groups * d_state, dtype=torch.float16).reshape(
-        batch, seq_len, n_groups, d_state
-    )
+    c_mat = torch.linspace(-1.0, 1.0, batch * seq_len * n_groups * d_state, dtype=torch.float16).reshape(batch, seq_len, n_groups, d_state)
+    b_mat = torch.linspace(1.0, -1.0, batch * seq_len * n_groups * d_state, dtype=torch.float16).reshape(batch, seq_len, n_groups, d_state)
 
-    kernel_cls = get_kernel_class("mamba.cb_producer", "CBProducerKernel")
+    kernel_cls = get_kernel_class("mamba.cb_producer", "SSDChunkCouplingKernel")
     tileops_kernel = kernel_cls(
         batch,
         num_chunks,

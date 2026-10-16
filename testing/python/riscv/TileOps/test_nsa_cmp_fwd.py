@@ -41,7 +41,7 @@ def test_nsa_cmp_fwd_varlen_float32_runtime_compare():
 
     kernel_cls = get_kernel_class(
         "attention.deepseek_nsa_cmp_fwd",
-        "NSACmpFwdVarlenKernel",
+        "NSACompressedFwdVarlenKernel",
     )
     tileops_kernel = kernel_cls(
         seq_num,
@@ -59,9 +59,7 @@ def test_nsa_cmp_fwd_varlen_float32_runtime_compare():
         config={"threads": 32},
     )
 
-    q = torch.linspace(-0.5, 0.5, c_seq_len * heads * dim_k, dtype=torch.float32).reshape(
-        c_seq_len, heads, dim_k
-    )
+    q = torch.linspace(-0.5, 0.5, c_seq_len * heads * dim_k, dtype=torch.float32).reshape(c_seq_len, heads, dim_k)
     k_cmp = torch.linspace(
         -0.4,
         0.4,

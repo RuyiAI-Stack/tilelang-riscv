@@ -9,13 +9,11 @@ def test_fp8_lightning_indexer_float32_runtime_compare() -> None:
     kernel_cls = get_kernel_class("fp8_lightning_indexer", "FP8LightningIndexerKernel")
     del kernel_cls
     module = __import__(
-        "tileops.kernels.fp8_lightning_indexer",
+        "tileops.kernels.attention.fp8_lightning_indexer",
         fromlist=["_fp8_lightning_indexer_kernel"],
     )
     batch, seq_len, heads, index_dim, seq_len_kv, kv_group = 1, 2, 1, 16, 2, 1
-    jit_kernel = module._fp8_lightning_indexer_kernel(
-        batch, seq_len, heads, index_dim, seq_len_kv, kv_group
-    )
+    jit_kernel = module._fp8_lightning_indexer_kernel(batch, seq_len, heads, index_dim, seq_len_kv, kv_group, 4)
     kernel = compile_tileops_jit(
         jit_kernel,
         {"block_N": 2, "num_stages": 0, "threads": 128, "block_Q": 2},

@@ -88,7 +88,7 @@ def test_deltanet_fwd_output_o_float32_runtime_compare():
 def test_deltanet_fwd_kernel_float32_runtime_compare():
     batch, heads, seq_len, chunk_size = 1, 1, 2, 2
     dim_k = dim_v = 16
-    kernel_cls = get_kernel_class("deltanet.deltanet_fwd", "DeltaNetFwdKernel")
+    kernel_cls = get_kernel_class("deltanet.deltanet_fwd", "DeltaNetChunkFwdKernel")
     tileops_kernel = kernel_cls(
         batch,
         heads,
@@ -135,12 +135,8 @@ def test_deltanet_fwd_kernel_float32_runtime_compare():
         for j in range(chunk_size):
             if i > j:
                 transform[i, j] = -gram[i, j] * beta[0, 0, i]
-    expected_w = (transform @ (k[0, 0] * beta[0, 0].unsqueeze(-1))).reshape(
-        batch, heads, seq_len, dim_k
-    )
-    expected_u = (transform @ (v[0, 0] * beta[0, 0].unsqueeze(-1))).reshape(
-        batch, heads, seq_len, dim_v
-    )
+    expected_w = (transform @ (k[0, 0] * beta[0, 0].unsqueeze(-1))).reshape(batch, heads, seq_len, dim_k)
+    expected_u = (transform @ (v[0, 0] * beta[0, 0].unsqueeze(-1))).reshape(batch, heads, seq_len, dim_v)
 
     state = torch.zeros(batch, heads, dim_k, dim_v, dtype=torch.float32)
     expected_s = torch.empty(batch, heads, seq_len // chunk_size + 1, dim_k, dim_v)

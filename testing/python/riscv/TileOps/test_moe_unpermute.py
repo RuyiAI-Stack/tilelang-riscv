@@ -8,7 +8,7 @@ from ._harness import get_kernel_class
 def test_moe_unpermute_float32_runtime_compare():
     num_tokens, top_k, hidden_size = 2, 2, 8
     padded_batch_sum = num_tokens * top_k
-    kernel_cls = get_kernel_class("moe.unpermute", "MoeUnpermuteKernel")
+    kernel_cls = get_kernel_class("moe.unpermute", "MoEUnpermuteKernel")
     tileops_kernel = kernel_cls(
         num_tokens=num_tokens,
         top_k=top_k,

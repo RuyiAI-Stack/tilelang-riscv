@@ -7,7 +7,7 @@ from ._harness import compile_tileops_kernel, get_kernel_class
 
 def test_topk_selector_float32_runtime_compare():
     batch, seq_len, seq_len_kv, kv_group, topk = 1, 2, 8, 1, 2
-    kernel_cls = get_kernel_class("topk_selector", "TopkSelectorKernel")
+    kernel_cls = get_kernel_class("topk_selector", "TopKSelectKernel")
     tileops_kernel = kernel_cls(
         batch,
         seq_len,

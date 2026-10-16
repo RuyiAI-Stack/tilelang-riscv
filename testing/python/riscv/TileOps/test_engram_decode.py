@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from ._harness import compile_tileops_kernel, get_kernel_class
+from ._harness import get_kernel_class
 
 
 def _rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
@@ -67,7 +67,6 @@ def test_engram_decode_float32_runtime_compare():
         torch.float32,
         config={"threads": 128},
     )
-    kernel = compile_tileops_kernel(tileops_kernel)
 
     e_t = torch.linspace(-0.5, 0.5, batch * d_mem, dtype=torch.float32).reshape(batch, d_mem)
     h_t = torch.linspace(-0.4, 0.4, batch * d, dtype=torch.float32).reshape(batch, d)
@@ -81,11 +80,9 @@ def test_engram_decode_float32_runtime_compare():
     W_V = torch.linspace(-0.2, 0.2, d_mem * d, dtype=torch.float32).reshape(d_mem, d)
     rms_w_h = torch.linspace(0.8, 1.2, d, dtype=torch.float32)
     rms_w_v = torch.linspace(0.9, 1.1, d, dtype=torch.float32)
-    conv_w = torch.linspace(-0.1, 0.1, conv_kernel_size * d, dtype=torch.float32).reshape(
-        conv_kernel_size, d
-    )
+    conv_w = torch.linspace(-0.1, 0.1, conv_kernel_size * d, dtype=torch.float32).reshape(conv_kernel_size, d)
 
-    actual = kernel(e_t, h_t, conv_state, W_K, W_V, rms_w_h, rms_w_v, conv_w)
+    actual = tileops_kernel(e_t, h_t, conv_state, W_K, W_V, rms_w_h, rms_w_v, conv_w)
     expected = _reference(
         e_t,
         h_t,

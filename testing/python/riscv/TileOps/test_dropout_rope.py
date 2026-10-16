@@ -50,11 +50,8 @@ def _rope_reference(
 @pytest.mark.parametrize(
     ("class_name", "neox"),
     [
-        ("RopeNeoxKernel", True),
-        ("RopeNonNeoxKernel", False),
-        ("RopeLlama31Kernel", True),
-        ("RopeYarnKernel", True),
-        ("RopeLongRopeKernel", True),
+        ("RoPENeoxKernel", True),
+        ("RoPENonNeoxKernel", False),
     ],
 )
 def test_rope_float32_runtime_compare(class_name, neox):
@@ -105,7 +102,7 @@ def test_rope_neox_position_ids_float32_runtime_compare():
     position_ids = torch.tensor([0, 3, 1, 6], dtype=torch.int32)
     status = torch.zeros(1, dtype=torch.int32)
 
-    rope_cls = get_kernel_class("rope", "RopeNeoxPositionIdsKernel")
+    rope_cls = get_kernel_class("rope", "RoPENeoxPositionIdsKernel")
     tileops_kernel = rope_cls(
         num_tokens,
         num_heads,
@@ -118,11 +115,11 @@ def test_rope_neox_position_ids_float32_runtime_compare():
     kernel = compile_tileops_kernel(tileops_kernel)
     actual = kernel(
         x.contiguous().reshape(-1),
-            cos.contiguous(),
-            sin.contiguous(),
-            position_ids.contiguous(),
-            status,
-        ).reshape(x.shape)
+        cos.contiguous(),
+        sin.contiguous(),
+        position_ids.contiguous(),
+        status,
+    ).reshape(x.shape)
     assert status.item() == 0
 
     expected = x.clone()

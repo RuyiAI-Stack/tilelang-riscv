@@ -39,18 +39,14 @@ def test_gqa_decode_bs1_short_context_float32_runtime_compare():
         dtype=torch.float32,
     )
     del tileops_kernel
-    module = __import__("tileops.kernels.attention.gqa_decode", fromlist=["_unused"])
-    jit_kernel = module._gqa_decode_no_split_kernel(
-        batch, heads, groups, dim, dim**-0.5, 0.0, "float32"
-    )
+    module = __import__("tileops.kernels.attention.gqa.decode", fromlist=["_unused"])
+    jit_kernel = module.gqa_decode_no_split_kernel(batch, heads, groups, dim, dim**-0.5, 0.0, "float32")
     kernel = compile_tileops_jit(
         jit_kernel,
         {"block_H": 64, "block_N": 128, "num_stages": 2, "threads": 128},
     )
 
-    q = torch.linspace(-0.5, 0.5, batch * heads * dim, dtype=torch.float32).reshape(
-        batch, heads, dim
-    )
+    q = torch.linspace(-0.5, 0.5, batch * heads * dim, dtype=torch.float32).reshape(batch, heads, dim)
     k = torch.linspace(
         -0.4,
         0.4,

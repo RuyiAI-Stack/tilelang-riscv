@@ -20,7 +20,7 @@ def _reference(flat: torch.Tensor, num_experts: int, block_size: int):
     for expert, padded_count in enumerate(padded):
         ids = [idx for idx, value in enumerate(flat.tolist()) if value == expert]
         if ids:
-            sorted_ids[offset:offset + len(ids)] = torch.tensor(ids, dtype=torch.int32)
+            sorted_ids[offset : offset + len(ids)] = torch.tensor(ids, dtype=torch.int32)
         for block in range(offset // block_size, (offset + padded_count) // block_size):
             expert_ids[block] = expert
         offset += padded_count
@@ -29,7 +29,7 @@ def _reference(flat: torch.Tensor, num_experts: int, block_size: int):
 
 def test_moe_permute_align_small_batch_int32_runtime_compare():
     numel, num_experts, block_size = 8, 4, 4
-    kernel_cls = get_kernel_class("moe.permute_align", "MoePermuteAlignKernel")
+    kernel_cls = get_kernel_class("moe.permute_align", "MoEPermuteAlignKernel")
     tileops_kernel = kernel_cls(numel=numel, num_experts=num_experts, block_size=block_size)
 
     # The public TileOps wrapper asserts CUDA tensors.  Validate the underlying
@@ -50,5 +50,5 @@ def test_moe_permute_align_small_batch_int32_runtime_compare():
     expected_sorted, expected_expert, expected_post = _reference(flat, num_experts, block_size)
     valid_blocks = expected_post.item() // block_size
     torch.testing.assert_close(post_pad, expected_post)
-    torch.testing.assert_close(sorted_ids[:expected_post.item()], expected_sorted[:expected_post.item()])
+    torch.testing.assert_close(sorted_ids[: expected_post.item()], expected_sorted[: expected_post.item()])
     torch.testing.assert_close(expert_ids[:valid_blocks], expected_expert[:valid_blocks])

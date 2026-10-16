@@ -44,15 +44,9 @@ def test_deltanet_decode_float32_runtime_compare(class_name: str):
     adapter = getattr(tileops_kernel._kernel_fn, "adapter", None)
     assert type(adapter).__name__ == "RiscvKernelAdapter"
 
-    q = torch.linspace(-0.5, 0.5, batch * heads * dim_k, dtype=torch.float32).reshape(
-        batch, heads, dim_k
-    )
-    k = torch.linspace(-0.4, 0.4, batch * heads * dim_k, dtype=torch.float32).reshape(
-        batch, heads, dim_k
-    )
-    v = torch.linspace(-0.3, 0.3, batch * heads * dim_v, dtype=torch.float32).reshape(
-        batch, heads, dim_v
-    )
+    q = torch.linspace(-0.5, 0.5, batch * heads * dim_k, dtype=torch.float32).reshape(batch, heads, dim_k)
+    k = torch.linspace(-0.4, 0.4, batch * heads * dim_k, dtype=torch.float32).reshape(batch, heads, dim_k)
+    v = torch.linspace(-0.3, 0.3, batch * heads * dim_v, dtype=torch.float32).reshape(batch, heads, dim_v)
     beta = torch.linspace(0.2, 0.8, batch * heads, dtype=torch.float32).reshape(batch, heads)
     state = torch.linspace(
         -0.2,
@@ -69,7 +63,7 @@ def test_deltanet_decode_float32_runtime_compare(class_name: str):
 
 def test_deltanet_raw_decode_bfloat16_runtime_compare():
     get_kernel_class("deltanet_recurrence", "DeltaNetDecodeRawCudaFlaStyleKernel")
-    module = importlib.import_module("tileops.kernels.linear_attention.deltanet_recurrence")
+    module = importlib.import_module("tileops.kernels.linear_attention.deltanet.recurrent")
     jit_kernel = module._deltanet_decode_raw_cuda_flastyle_tl(1, 1, 128, 128)
     kernel = compile_tileops_jit(jit_kernel, {"threads": 32})
     q = torch.linspace(-0.1, 0.1, 128, dtype=torch.bfloat16).reshape(1, 1, 128)

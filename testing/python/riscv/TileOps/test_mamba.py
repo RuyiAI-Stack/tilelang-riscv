@@ -22,7 +22,7 @@ def _da_cumsum_reference(
 def test_da_cumsum_float32_runtime_compare():
     batch, num_chunks, chunk_len, n_heads = 1, 2, 4, 2
     seq_len = num_chunks * chunk_len
-    kernel_cls = get_kernel_class("mamba.da_cumsum", "DaCumsumFwdKernel")
+    kernel_cls = get_kernel_class("mamba.da_cumsum", "SSDChunkCumsumFwdKernel")
     tileops_kernel = kernel_cls(
         batch,
         num_chunks,

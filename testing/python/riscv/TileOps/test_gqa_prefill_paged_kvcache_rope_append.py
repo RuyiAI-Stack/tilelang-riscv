@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from ._harness import get_kernel_class
+from ._harness import compile_tileops_jit
 
 
 def _reference(
@@ -32,9 +32,7 @@ def _reference(
                     paired_d = d + half if d < half else d - half
                     paired_val = k_new[pos, h, paired_d]
                     rotated = -paired_val if d < half else paired_val
-                    val = val * cos_table[logical, freq_idx] + rotated * sin_table[
-                        logical, freq_idx
-                    ]
+                    val = val * cos_table[logical, freq_idx] + rotated * sin_table[logical, freq_idx]
                 k_pages[physical, h, d] = val
                 v_pages[physical, h, d] = v_new[pos, h, d]
     return k_pages, v_pages
@@ -53,41 +51,25 @@ def test_gqa_prefill_paged_kvcache_rope_append_float32_runtime_compare():
     )
     max_position = old_len + seq_new
     physical_tokens = max_pages * page_size
-    kernel_cls = get_kernel_class(
-        "attention.gqa_fwd", "GQAPrefillPagedWithKVCacheRopeAppendKernel"
-    )
-    tileops_kernel = kernel_cls(
-        batch=batch,
-        heads_kv=heads_kv,
-        max_pages_per_req=max_pages,
-        page_size=page_size,
-        dim=dim,
-        max_position=max_position,
-        rotary_dim=rotary_dim,
-        dtype=torch.float32,
-        config={"block_m": 4, "threads": 128},
-    )
+    from tileops.kernels.attention.gqa.prefill_paged_kv_append import _gqa_prefill_paged_with_kv_cache_rope_append_kernel
 
-    k_new = torch.linspace(-0.4, 0.4, seq_new * heads_kv * dim, dtype=torch.float32).reshape(
-        seq_new, heads_kv, dim
+    factory = _gqa_prefill_paged_with_kv_cache_rope_append_kernel(
+        batch, heads_kv, seq_new, physical_tokens, max_pages, page_size, dim, max_position, rotary_dim, "float32"
     )
-    v_new = torch.linspace(-0.3, 0.3, seq_new * heads_kv * dim, dtype=torch.float32).reshape(
-        seq_new, heads_kv, dim
-    )
+    kernel = compile_tileops_jit(factory, dict(block_m=4, threads=128))
+
+    k_new = torch.linspace(-0.4, 0.4, seq_new * heads_kv * dim, dtype=torch.float32).reshape(seq_new, heads_kv, dim)
+    v_new = torch.linspace(-0.3, 0.3, seq_new * heads_kv * dim, dtype=torch.float32).reshape(seq_new, heads_kv, dim)
     k_pages = torch.zeros(physical_tokens, heads_kv, dim, dtype=torch.float32)
     v_pages = torch.zeros_like(k_pages)
     cu_seqlens_q = torch.tensor([0, seq_new], dtype=torch.int32)
     cache_seqlens = torch.tensor([old_len], dtype=torch.int32)
     block_table = torch.tensor([[0, 1]], dtype=torch.int32)
     half = rotary_dim // 2
-    cos_table = torch.linspace(0.7, 1.0, max_position * half, dtype=torch.float32).reshape(
-        max_position, half
-    )
-    sin_table = torch.linspace(-0.2, 0.2, max_position * half, dtype=torch.float32).reshape(
-        max_position, half
-    )
+    cos_table = torch.linspace(0.7, 1.0, max_position * half, dtype=torch.float32).reshape(max_position, half)
+    sin_table = torch.linspace(-0.2, 0.2, max_position * half, dtype=torch.float32).reshape(max_position, half)
 
-    tileops_kernel(
+    kernel(
         k_new,
         v_new,
         k_pages,
@@ -95,9 +77,9 @@ def test_gqa_prefill_paged_kvcache_rope_append_float32_runtime_compare():
         cu_seqlens_q,
         cache_seqlens,
         block_table,
-        seq_new,
         cos_table,
         sin_table,
+        seq_new,
     )
     expected_k, expected_v = _reference(
         k_new,

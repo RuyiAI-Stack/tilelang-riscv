@@ -29,7 +29,7 @@ def _load_gla_fwd_module():
 def test_gla_fwd_precompute_g_float32_runtime_compare():
     batch, seq_len, heads, dim_k, chunk_size = 1, 4, 2, 4, 2
     module = _load_gla_fwd_module()
-    kernel = module._gla_precompute_g_kernel(
+    kernel = module.gla_precompute_g_kernel(
         batch,
         seq_len,
         heads,
@@ -107,10 +107,8 @@ def _run_full_gla_forward(
     dim_v = v.shape[-1]
     module = _load_gla_fwd_module()
 
-    g_jit = module._gla_precompute_g_kernel(
-        batch, seq_len, heads, dim_k, chunk_size, "float32"
-    )
-    h_jit = module._gla_fwd_h_kernel(
+    g_jit = module.gla_precompute_g_kernel(batch, seq_len, heads, dim_k, chunk_size, "float32")
+    h_jit = module.gla_fwd_h_kernel(
         batch,
         seq_len,
         heads,
@@ -121,9 +119,7 @@ def _run_full_gla_forward(
         num_v_partitions=1,
         num_k_partitions=1,
     )
-    o_jit = module._gla_fwd_o_kernel(
-        batch, seq_len, heads, dim_k, dim_v, chunk_size, scale, "float32"
-    )
+    o_jit = module._gla_fwd_o_kernel(batch, seq_len, heads, dim_k, dim_v, chunk_size, scale, "float32")
     g_kernel = compile_tileops_jit(g_jit, {"num_stages": 1, "threads": 64})
     h_kernel = compile_tileops_jit(h_jit, {"num_stages": 1, "threads": 64})
     o_kernel = compile_tileops_jit(o_jit, {"num_stages": 1, "threads": 64})
@@ -140,13 +136,9 @@ def test_gla_fwd_full_float32_runtime_compare() -> None:
     scale = dim_k**-0.5
     values_k = batch * seq_len * heads * dim_k
     values_v = batch * seq_len * heads * dim_v
-    q = torch.linspace(-0.2, 0.2, values_k, dtype=torch.float32).reshape(
-        batch, seq_len, heads, dim_k
-    )
+    q = torch.linspace(-0.2, 0.2, values_k, dtype=torch.float32).reshape(batch, seq_len, heads, dim_k)
     k = torch.linspace(0.2, -0.2, values_k, dtype=torch.float32).reshape_as(q)
-    v = torch.linspace(-0.3, 0.3, values_v, dtype=torch.float32).reshape(
-        batch, seq_len, heads, dim_v
-    )
+    v = torch.linspace(-0.3, 0.3, values_v, dtype=torch.float32).reshape(batch, seq_len, heads, dim_v)
     g = -torch.linspace(0.01, 0.2, values_k, dtype=torch.float32).reshape_as(q)
 
     actual, _states, _g_cumsum = _run_full_gla_forward(q, k, v, g, chunk_size, scale)

@@ -38,7 +38,7 @@ def test_sparse_mla_basic_float32_runtime_compare():
     q_start_index_s = 0
     kernel_cls = get_kernel_class(
         "attention.deepseek_dsa_decode",
-        "SparseMlaBasicKernel",
+        "DSADecodeBasicKernel",
     )
     tileops_kernel = kernel_cls(
         batch=batch,

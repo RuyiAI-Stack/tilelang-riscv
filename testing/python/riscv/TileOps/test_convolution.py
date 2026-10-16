@@ -158,9 +158,9 @@ def test_group_conv1d_depthwise_float32_runtime_compare():
         has_bias=False,
         groups=groups,
         config={
-            "block_m": 1,
+            "block_m": 16,
             "block_n": 8,
-            "block_k": 1,
+            "block_k": 16,
             "num_stages": 1,
             "threads": 16,
             "enable_rasterization": False,
@@ -569,7 +569,7 @@ def test_group_conv2d_depthwise_float32_runtime_compare():
         has_bias=False,
         groups=groups,
         config={
-            "block_m": 1,
+            "block_m": 16,
             "block_n": 16,
             "block_k": 4,
             "num_stages": 1,
@@ -635,7 +635,7 @@ def test_group_conv3d_depthwise_float32_runtime_compare():
         has_bias=False,
         groups=groups,
         config={
-            "block_m": 1,
+            "block_m": 16,
             "block_n": 8,
             "block_k": 8,
             "num_stages": 1,
