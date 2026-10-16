@@ -77,7 +77,7 @@ jobs:
           python -m pip install --index-url https://download.pytorch.org/whl/cpu --no-deps torch
           python -m pip install \
             "apache-tvm-ffi>=0.1.2,<0.1.10" \
-            cloudpickle filelock fsspec jinja2 ml-dtypes networkx numpy packaging \
+            cloudpickle "cython>=3.1.0" filelock fsspec jinja2 ml-dtypes networkx numpy packaging \
             psutil pytest setuptools sympy tqdm typing-extensions "z3-solver>=4.13.0,<4.15.5"
           echo "Z3_ROOT=$(python -c 'import z3; print(z3.__path__[0])')" >> "${GITHUB_ENV}"
 
@@ -106,7 +106,7 @@ jobs:
             -DZ3_ROOT="${Z3_ROOT}" \
             -DZ3_INCLUDE_DIR="${Z3_ROOT}/include" \
             -DZ3_LIBRARY="${Z3_ROOT}/lib/libz3.so"
-          cmake --build build --target tilelang --parallel 2
+          cmake --build build --target tilelang tilelang_cython_wrapper --parallel 2
 
       - name: Test RISC-V lowering and Buddy MLIR code generation
         run: |
