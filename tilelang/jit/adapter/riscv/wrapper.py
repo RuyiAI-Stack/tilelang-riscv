@@ -652,7 +652,8 @@ def resolve_riscv_linker(*, required: bool = True) -> Path | None:
 
     if required:
         raise ToolchainNotFoundError(
-            "No RISC-V linker found. Build the vendored LLVM toolchain with lld enabled or set TILELANG_RISCV_LINKER to a cross linker."
+            "No RISC-V linker found. Use the Buddy MLIR release/v0.1.0 LLVM/MLIR toolchain with lld enabled "
+            "or set TILELANG_RISCV_LINKER to a cross linker."
         )
     return None
 

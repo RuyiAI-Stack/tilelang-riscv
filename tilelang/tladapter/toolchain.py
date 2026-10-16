@@ -1,4 +1,4 @@
-"""Helpers for locating the vendored LLVM/MLIR toolchain."""
+"""Helpers for locating the external LLVM/MLIR toolchain."""
 
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ def _candidate_roots() -> list[Path]:
 
     roots.extend(
         [
-            _BUDDY_MLIR_ROOT / "llvm" / "install",
             _BUDDY_MLIR_ROOT / "llvm" / "build",
+            _BUDDY_MLIR_ROOT / "llvm" / "install",
             _LLVM_SUBMODULE_ROOT / "install",
             _LLVM_SUBMODULE_ROOT / "build-host" / "install",
             _LLVM_SUBMODULE_ROOT / "build" / "install",
@@ -59,7 +59,8 @@ def resolve_llvm_root(*, required: bool = True) -> Path | None:
     if required:
         raise ToolchainNotFoundError(
             "LLVM/MLIR toolchain not found. Build it with "
-            "`maint/scripts/build_llvm_mlir.sh` or set TILELANG_RISCV_LLVM_ROOT."
+            "Buddy MLIR release/v0.1.0 as described in "
+            "`docs/get_started/BuildOnSG2044.md`, or set TILELANG_RISCV_LLVM_ROOT."
         )
     return None
 
@@ -90,7 +91,7 @@ def resolve_llvm_dir(*, required: bool = True) -> Path | None:
 
 
 def resolve_tool(tool_name: str, *, required: bool = True) -> Path | None:
-    """Resolve a tool from the vendored toolchain or PATH."""
+    """Resolve a tool from the configured LLVM/MLIR toolchain or PATH."""
 
     for root in iter_llvm_roots():
         candidate = root / "bin" / tool_name
@@ -109,7 +110,7 @@ def resolve_tool(tool_name: str, *, required: bool = True) -> Path | None:
 
 
 def resolve_mlir_python_root(*, required: bool = True) -> Path | None:
-    """Resolve the vendored MLIR Python package root."""
+    """Resolve the LLVM/MLIR Python package root."""
 
     for root in iter_llvm_roots():
         candidate = root / "python_packages" / "mlir_core"
@@ -118,8 +119,8 @@ def resolve_mlir_python_root(*, required: bool = True) -> Path | None:
 
     if required:
         raise ToolchainNotFoundError(
-            "MLIR Python bindings not found. Build the vendored toolchain with "
-            "`maint/scripts/build_llvm_mlir.sh` and keep MLIR Python bindings enabled."
+            "MLIR Python bindings not found. Build Buddy MLIR release/v0.1.0 as described in "
+            "`docs/get_started/BuildOnSG2044.md`, with MLIR Python bindings enabled."
         )
     return None
 

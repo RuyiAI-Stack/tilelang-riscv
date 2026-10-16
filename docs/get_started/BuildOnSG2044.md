@@ -14,13 +14,44 @@ The validated flow is:
 
 This document is about native execution on SG2044.
 
+## Buddy MLIR Version
+
+The RISC-V backend is validated against the current stable Buddy MLIR release
+as of October 16, 2026,
+`release/v0.1.0` (commit `2860a0e135966387e22c48e61105c99a824ef7fe`). It uses
+LLVM/MLIR 24.0.0git from the `llvm` submodule at
+`3845a20590afedfbece4d000f97a6cfbbea3bf43`. The backend links to LLVM/MLIR
+directly and does not use Buddy-specific libraries. CMake requires LLVM/MLIR
+24.0 to catch unsupported toolchains during configuration.
+
+Clone the pinned Buddy release and its LLVM source before building the
+toolchain:
+
+```bash
+git clone --depth 1 --branch release/v0.1.0 \
+  https://github.com/buddy-compiler/buddy-mlir.git
+cd buddy-mlir
+git submodule update --init llvm
+test "$(git rev-parse HEAD)" = "2860a0e135966387e22c48e61105c99a824ef7fe"
+test "$(git -C llvm rev-parse HEAD)" = "3845a20590afedfbece4d000f97a6cfbbea3bf43"
+```
+
+Use a checkout of the matching LLVM submodule for the build steps in Buddy's
+[RVV environment guide](https://github.com/buddy-compiler/buddy-mlir/blob/release/v0.1.0/docs/RVVEnvironment.md).
+The generic installation steps below apply to this pinned release.
+
+For x86_64 compiler and codegen validation, the release also provides the
+`llvm-24.0.0git-cp312-abi3-manylinux_2_28_x86_64.tar.gz` asset. Extract it and
+set `TILELANG_RISCV_LLVM_ROOT` to the extracted directory. Use the matching
+RISC-V asset or a source build on SG2044 when native execution is required.
+
 ## Get the Sources
 
 Clone the repository with its bundled dependencies, including the `TileKernels`
 submodule used by the RISC-V operator-library tests:
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang.git tilelang-riscv
+git clone --recursive https://github.com/RuyiAI-Stack/tilelang-riscv.git tilelang-riscv
 cd tilelang-riscv
 ```
 
@@ -44,7 +75,7 @@ export CXX=/path/to/g++
 export PATH=/path/to/gcc-bin:$TILELANG_RISCV_LLVM_ROOT/bin:$Z3_ROOT/bin:$PATH
 export LIBRARY_PATH=/path/to/gcc-lib64/lp64d:/path/to/gcc-libgcc/lp64d${LIBRARY_PATH:+:$LIBRARY_PATH}
 export TVM_FFI_DISABLE_TORCH_C_DLPACK=1
-export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=OFF"
+export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=OFF -DTILELANG_RISCV_MLIR_MODE=ON"
 ```
 
 Notes:

@@ -73,6 +73,14 @@ LLVM/MLIR and GCC library paths; see the
 
 ## Validation scope
 
+The dedicated [Buddy MLIR CI workflow](../../../.github/workflows/ci-buddy-mlir.yml)
+uses the official LLVM/MLIR 24.0 toolchain asset from Buddy MLIR
+`release/v0.1.0`, builds TileLang against it, and runs the core lowering and
+codegen suites on an x86_64 runner. It validates compiler integration, not
+native RVV execution on SG2044.
+The pinned release and local build steps are documented in the
+[SG2044 build guide](../../../docs/get_started/BuildOnSG2044.md).
+
 The October 16 x86 host runs at TileOps `67250e81` passed 415 TileOps checks
 (400 kernel/component numerical, 12 scoped public-API numerical and three
 rejection checks) and 48 TileKernels numerical checks. There are no compile-only

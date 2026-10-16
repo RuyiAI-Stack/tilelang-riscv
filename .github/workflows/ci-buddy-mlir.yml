@@ -1,0 +1,118 @@
+name: Buddy MLIR RISC-V
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ci-buddy-mlir.yml"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - "3rdparty/tvm"
+      - "3rdparty/tvm/**"
+      - "src/target/codegen_riscv.*"
+      - "src/target/rt_mod_riscv.cc"
+      - "tilelang/engine/**"
+      - "tilelang/utils/target.py"
+      - "tilelang/env.py"
+      - "tilelang/tladapter/**"
+      - "tilelang/jit/adapter/riscv/**"
+      - "testing/python/riscv/**"
+      - "README.md"
+      - "docs/get_started/BuildOnSG2044.md"
+  pull_request:
+    paths:
+      - ".github/workflows/ci-buddy-mlir.yml"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - "3rdparty/tvm"
+      - "3rdparty/tvm/**"
+      - "src/target/codegen_riscv.*"
+      - "src/target/rt_mod_riscv.cc"
+      - "tilelang/engine/**"
+      - "tilelang/utils/target.py"
+      - "tilelang/env.py"
+      - "tilelang/tladapter/**"
+      - "tilelang/jit/adapter/riscv/**"
+      - "testing/python/riscv/**"
+      - "README.md"
+      - "docs/get_started/BuildOnSG2044.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  buddy-mlir:
+    name: Buddy MLIR release/v0.1.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TILELANG_RISCV_MLIR_MODE: "ON"
+      TILELANG_DISABLE_CACHE: "1"
+      TVM_FFI_DISABLE_TORCH_C_DLPACK: "1"
+
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu --no-deps torch
+          python -m pip install \
+            "apache-tvm-ffi>=0.1.2,<0.1.10" \
+            cloudpickle filelock fsspec jinja2 ml-dtypes networkx numpy packaging \
+            psutil pytest setuptools sympy tqdm typing-extensions "z3-solver>=4.13.0,<4.15.5"
+          echo "Z3_ROOT=$(python -c 'import z3; print(z3.__path__[0])')" >> "${GITHUB_ENV}"
+
+      - name: Download Buddy MLIR release LLVM/MLIR toolchain
+        run: |
+          BUDDY_LLVM_ASSET="llvm-24.0.0git-cp312-abi3-manylinux_2_28_x86_64.tar.gz"
+          BUDDY_LLVM_ARCHIVE="${RUNNER_TEMP}/${BUDDY_LLVM_ASSET}"
+          BUDDY_LLVM_ROOT="${RUNNER_TEMP}/buddy-mlir-0.1.0"
+          curl --fail --location --retry 3 \
+            "https://github.com/buddy-compiler/buddy-mlir/releases/download/release/v0.1.0/${BUDDY_LLVM_ASSET}" \
+            --output "${BUDDY_LLVM_ARCHIVE}"
+          echo "fe7a9f3dde466decbfa50fc8f89494dcfc401b31826f8a8b513562aa37edaabd  ${BUDDY_LLVM_ARCHIVE}" \
+            | sha256sum --check
+          mkdir -p "${BUDDY_LLVM_ROOT}"
+          tar -xzf "${BUDDY_LLVM_ARCHIVE}" -C "${BUDDY_LLVM_ROOT}"
+          echo "TILELANG_RISCV_LLVM_ROOT=${BUDDY_LLVM_ROOT}" >> "${GITHUB_ENV}"
+
+      - name: Configure and build TileLang with Buddy MLIR
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTILELANG_RISCV_MLIR_MODE=ON \
+            -DTILELANG_RISCV_LLVM_ROOT="${TILELANG_RISCV_LLVM_ROOT}" \
+            -DUSE_CUDA=OFF -DUSE_ROCM=OFF -DUSE_METAL=OFF \
+            -DUSE_Z3=ON -DUSE_PYPI_Z3=ON \
+            -DZ3_ROOT="${Z3_ROOT}" \
+            -DZ3_INCLUDE_DIR="${Z3_ROOT}/include" \
+            -DZ3_LIBRARY="${Z3_ROOT}/lib/libz3.so"
+          cmake --build build --target tilelang --parallel 2
+
+      - name: Test RISC-V lowering and Buddy MLIR code generation
+        run: |
+          python -m pytest -q \
+            testing/python/riscv/test_riscv_target_parse.py \
+            testing/python/riscv/test_riscv_toolchain.py \
+            testing/python/riscv/test_riscv_tladapter_pipeline.py \
+            testing/python/riscv/test_riscv_artifact_export.py \
+            testing/python/riscv/codegen_ops

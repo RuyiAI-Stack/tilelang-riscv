@@ -56,7 +56,8 @@ The native RISC-V workflow requires:
 
 - Python 3.9 or newer
 - CMake 3.26 or newer
-- an LLVM/MLIR installation, such as the toolchain built by Buddy MLIR
+- Buddy MLIR `release/v0.1.0` and its LLVM/MLIR 24.0 toolchain (see the
+  [SG2044 build guide](./docs/get_started/BuildOnSG2044.md))
 - a native RISC-V GCC toolchain and sysroot
 - a RISC-V machine for native execution, such as SG2044
 
@@ -130,6 +131,10 @@ Run the core RISC-V backend tests:
 ```sh
 python -m pytest -q testing/python/riscv/test_riscv_*.py
 ```
+
+Pull requests that change the RISC-V backend also run the
+[Buddy MLIR CI workflow](./.github/workflows/ci-buddy-mlir.yml), which builds
+against the pinned LLVM/MLIR 24.0 toolchain from Buddy MLIR `release/v0.1.0`.
 
 Run the synthetic MLIR/code-generation tests:
 
