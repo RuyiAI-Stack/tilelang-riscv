@@ -1242,8 +1242,14 @@ private:
 
     std::vector<Interval> intervals;
     intervals.reserve(buf_infos.size());
+    bool disable_reuse =
+        tvm::transform::PassContext::Current()
+            ->GetConfig<Bool>(kDisableSharedMemoryReuse, Bool(false))
+            .value();
     for (const BufInfo &info : buf_infos) {
-      if (!info.const_size_bytes.has_value())
+      // CUDA still requires one dynamic shared allocation. With reuse disabled,
+      // append every buffer sequentially instead of packing disjoint lifetimes.
+      if (disable_reuse || !info.const_size_bytes.has_value())
         continue;
       // Only constant-sized buffers participate in the arena packing because
       // dynamic sizes must be placed sequentially later.

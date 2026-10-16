@@ -86,8 +86,30 @@ def test_tilelang_compile_runs_thread_invariant_shared_sync_phases_once():
     kernel.close()
 
     assert source.count("scf.parallel") == 3
-    assert source.count("scf.for") == 6
+    # Only the two unit launch dimensions remain; no per-thread replay loops.
+    assert source.count("scf.for") == 2
     torch.testing.assert_close(out, data * 2)
+
+
+@pytest.mark.parametrize("threads", [1, 32])
+@pytest.mark.parametrize("scope", ["shared", "local.fragment"])
+def test_scratch_partial_copy_has_deterministic_padding(threads, scope):
+    @T.prim_func
+    def partial_copy(A: T.Tensor((3,), "float32"), B: T.Tensor((8,), "float32")):
+        with T.Kernel(1, threads=threads):
+            scratch = T.alloc_buffer((8,), "float32", scope=scope)
+            T.copy(A, scratch[2:5])
+            T.sync_threads()
+            T.copy(scratch, B)
+
+    kernel = tilelang.compile(partial_copy, out_idx=[1], target="riscv")
+    try:
+        data = torch.tensor([3.0, -2.0, 7.0])
+        actual = kernel(data)
+        assert "linalg.fill" in kernel.get_kernel_source()
+        torch.testing.assert_close(actual, torch.tensor([0.0, 0.0, 3.0, -2.0, 7.0, 0.0, 0.0, 0.0]))
+    finally:
+        kernel.close()
 
 
 @T.prim_func
@@ -477,13 +499,9 @@ def test_tilelang_compile_runs_riscv_host_adapter_with_gemv_shape():
 
 @T.macro
 def tile_grouped_gemm_step(A, B, C, group_idx, row_offset, group_rows):
-    A_group = T.match_buffer(
-        A[row_offset : row_offset + group_rows, 0:GROUP_K], (group_rows, GROUP_K), dtype="float32"
-    )
+    A_group = T.match_buffer(A[row_offset : row_offset + group_rows, 0:GROUP_K], (group_rows, GROUP_K), dtype="float32")
     B_group = T.match_buffer(B[group_idx, 0:GROUP_K, 0:GROUP_N], (GROUP_K, GROUP_N), dtype="float32")
-    C_group = T.match_buffer(
-        C[row_offset : row_offset + group_rows, 0:GROUP_N], (group_rows, GROUP_N), dtype="float32"
-    )
+    C_group = T.match_buffer(C[row_offset : row_offset + group_rows, 0:GROUP_N], (group_rows, GROUP_N), dtype="float32")
     A_shared = T.alloc_shared((group_rows, GROUP_K), "float32")
     B_shared = T.alloc_shared((GROUP_K, GROUP_N), "float32")
     C_local = T.alloc_fragment((group_rows, GROUP_N), "float32")
@@ -502,20 +520,16 @@ def tile_grouped_gemm_portable(
 ):
     with T.Kernel(1, threads=1):
         tile_grouped_gemm_step(A, B, C, 0, 0, GROUP_SIZES_GROUPED_GEMM[0])
-        tile_grouped_gemm_step(
-            A, B, C, 1, GROUP_SIZES_GROUPED_GEMM[0], GROUP_SIZES_GROUPED_GEMM[1]
-        )
+        tile_grouped_gemm_step(A, B, C, 1, GROUP_SIZES_GROUPED_GEMM[0], GROUP_SIZES_GROUPED_GEMM[1])
 
 
 def test_tilelang_compile_runs_riscv_host_adapter_with_grouped_gemm():
     kernel = tilelang.compile(tile_grouped_gemm_portable, out_idx=[2], target="riscv")
 
-    lhs = torch.arange(GROUP_TOTAL_GROUPED_GEMM * GROUP_K, dtype=torch.float32).reshape(
-        GROUP_TOTAL_GROUPED_GEMM, GROUP_K
+    lhs = torch.arange(GROUP_TOTAL_GROUPED_GEMM * GROUP_K, dtype=torch.float32).reshape(GROUP_TOTAL_GROUPED_GEMM, GROUP_K)
+    rhs = torch.arange(len(GROUP_SIZES_GROUPED_GEMM) * GROUP_K * GROUP_N, dtype=torch.float32).reshape(
+        len(GROUP_SIZES_GROUPED_GEMM), GROUP_K, GROUP_N
     )
-    rhs = torch.arange(
-        len(GROUP_SIZES_GROUPED_GEMM) * GROUP_K * GROUP_N, dtype=torch.float32
-    ).reshape(len(GROUP_SIZES_GROUPED_GEMM), GROUP_K, GROUP_N)
     out = kernel(lhs, rhs)
 
     refs = []
@@ -570,9 +584,7 @@ def test_tilelang_compile_runs_riscv_host_adapter_with_dynamic_grouped_gemm():
     kernel = tilelang.compile(tile_dynamic_grouped_gemm, out_idx=[4], target="riscv")
 
     lhs = torch.arange(24, dtype=torch.float32).reshape(6, 4)
-    rhs = torch.arange(GROUP_COUNT_DYNAMIC * GROUP_K * GROUP_N, dtype=torch.float32).reshape(
-        GROUP_COUNT_DYNAMIC, GROUP_K, GROUP_N
-    )
+    rhs = torch.arange(GROUP_COUNT_DYNAMIC * GROUP_K * GROUP_N, dtype=torch.float32).reshape(GROUP_COUNT_DYNAMIC, GROUP_K, GROUP_N)
     offsets = torch.tensor([0, 2, 3], dtype=torch.int32)
     sizes = torch.tensor([2, 1, 3], dtype=torch.int32)
     out = kernel(lhs, rhs, offsets, sizes)
@@ -691,3 +703,36 @@ def test_tilelang_compile_runs_riscv_host_adapter_with_dynamic_rank_reduced_copy
     assert "memref.subview" in source
     assert "memref.copy" in source
     torch.testing.assert_close(out, data.squeeze(-1))
+
+
+@pytest.mark.parametrize("length", [1, 7, 9, 17])
+def test_tile_copy_pads_input_and_preserves_output_canaries(length):
+    n = T.dynamic("copy_tail_n")
+
+    @T.prim_func
+    def copy_tail(
+        A: T.Tensor((n,), "float32"),
+        Padded: T.Tensor((T.ceildiv(n, 8), 8), "float32"),
+        Output: T.Tensor((n,), "float32"),
+    ):
+        with T.Kernel(T.ceildiv(n, 8), threads=1) as bx:
+            tile = T.alloc_shared((8,), "float32")
+            T.copy(A[bx * 8 : bx * 8 + 8], tile)
+            T.copy(tile, Padded[bx, :])
+            T.copy(tile, Output[bx * 8 : bx * 8 + 8])
+
+    data = torch.arange(1, length + 1, dtype=torch.float32)
+    padded = torch.full(((length + 7) // 8, 8), -999.0)
+    backing = torch.full((length + 16,), -777.0)
+    output = backing[8 : 8 + length]
+    kernel = tilelang.compile(copy_tail, out_idx=[], target="riscv")
+    try:
+        kernel(data, padded, output)
+    finally:
+        kernel.close()
+    expected = torch.zeros_like(padded).flatten()
+    expected[:length] = data
+    torch.testing.assert_close(padded.flatten(), expected)
+    torch.testing.assert_close(output, data)
+    torch.testing.assert_close(backing[:8], torch.full((8,), -777.0))
+    torch.testing.assert_close(backing[8 + length :], torch.full((8,), -777.0))

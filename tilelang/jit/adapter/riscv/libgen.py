@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 import re
 import subprocess
 import tempfile
@@ -18,11 +19,11 @@ DEFAULT_RISCV_TRIPLE = os.environ.get("TILELANG_RISCV_TRIPLE", "riscv64-unknown-
 
 _F8_EXTF_RE = re.compile(
     r"^(?P<indent>\s*)(?P<result>%[\w\d_.$-]+)\s*=\s*arith\.extf\s+"
-    r"(?P<value>%[\w\d_.$-]+)\s*:\s*(?P<src>f8E4M3FN(?:UZ)?)\s+to\s+f32\s*$"
+    r"(?P<value>%[\w\d_.$-]+)\s*:\s*(?P<src>f8E4M3FN(?:UZ)?)\s+to\s+(?P<dst>f16|bf16|f32)\s*$"
 )
 _F8_TRUNCF_RE = re.compile(
     r"^(?P<indent>\s*)(?P<result>%[\w\d_.$-]+)\s*=\s*arith\.truncf\s+"
-    r"(?P<value>%[\w\d_.$-]+)\s*:\s*f32\s+to\s+(?P<dst>f8E4M3FN(?:UZ)?)\s*$"
+    r"(?P<value>%[\w\d_.$-]+)\s*:\s*(?P<src>f16|bf16|f32)\s+to\s+(?P<dst>f8E4M3FN(?:UZ)?)\s*$"
 )
 _F4_EXTF_RE = re.compile(
     r"^(?P<indent>\s*)(?P<result>%[\w\d_.$-]+)\s*=\s*arith\.extf\s+"
@@ -31,6 +32,10 @@ _F4_EXTF_RE = re.compile(
 _F4_TRUNCF_RE = re.compile(
     r"^(?P<indent>\s*)(?P<result>%[\w\d_.$-]+)\s*=\s*arith\.truncf\s+"
     r"(?P<value>%[\w\d_.$-]+)\s*:\s*f32\s+to\s+f4E2M1FN\s*$"
+)
+_F4_CONSTANT_RE = re.compile(
+    r"^(?P<prefix>\s*%[\w\d_.$-]+\s*=\s*arith\.constant\s+)"
+    r"(?P<value>\S+)\s*:\s*f4E2M1FN\s*$"
 )
 _MATH_COPYSIGN_RE = re.compile(
     r"^(?P<indent>\s*)(?P<result>%[\w\d_.$-]+)\s*=\s*math\.copysign\s+"
@@ -64,18 +69,33 @@ def _legalize_low_precision_conversions_for_riscv(mlir_source: str) -> str:
     helper_decls: set[str] = set()
     rewritten: list[str] = []
     for line in mlir_source.splitlines():
+        f4_constant = _F4_CONSTANT_RE.match(line)
+        if f4_constant:
+            literal = f4_constant.group("value")
+            if literal.startswith("0x"):
+                bits = int(literal, 16)
+            else:
+                value = float(literal)
+                magnitude = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0).index(abs(value))
+                bits = magnitude | (8 if math.copysign(1.0, value) < 0 else 0)
+            rewritten.append(f"{f4_constant.group('prefix')}{bits} : i8")
+            continue
         ext_match = _F8_EXTF_RE.match(line)
         if ext_match:
             indent = ext_match.group("indent")
             result = ext_match.group("result")
             value = ext_match.group("value")
             src = ext_match.group("src")
+            dst = ext_match.group("dst")
             suffix = _f8_helper_suffix(src)
             bits = _ssa_suffix(result, "bits")
             helper = f"tilelang_riscv_{suffix}_to_f32"
             helper_decls.add(f"  func.func private @{helper}(i8) -> f32")
             rewritten.append(f"{indent}{bits} = arith.bitcast {value} : {src} to i8")
-            rewritten.append(f"{indent}{result} = func.call @{helper}({bits}) : (i8) -> f32")
+            decoded = result if dst == "f32" else _ssa_suffix(result, "decoded_f32")
+            rewritten.append(f"{indent}{decoded} = func.call @{helper}({bits}) : (i8) -> f32")
+            if dst != "f32":
+                rewritten.append(f"{indent}{result} = arith.truncf {decoded} : f32 to {dst}")
             continue
 
         trunc_match = _F8_TRUNCF_RE.match(line)
@@ -83,11 +103,17 @@ def _legalize_low_precision_conversions_for_riscv(mlir_source: str) -> str:
             indent = trunc_match.group("indent")
             result = trunc_match.group("result")
             value = trunc_match.group("value")
+            src = trunc_match.group("src")
             dst = trunc_match.group("dst")
             suffix = _f8_helper_suffix(dst)
             bits = _ssa_suffix(result, "bits")
             helper = f"tilelang_riscv_f32_to_{suffix}"
             helper_decls.add(f"  func.func private @{helper}(f32) -> i8")
+            if src != "f32":
+                # FP16/BF16 values widen exactly; only the FP8 helper rounds.
+                widened = _ssa_suffix(result, "widened_f32")
+                rewritten.append(f"{indent}{widened} = arith.extf {value} : {src} to f32")
+                value = widened
             rewritten.append(f"{indent}{bits} = func.call @{helper}({value}) : (f32) -> i8")
             rewritten.append(f"{indent}{result} = arith.bitcast {bits} : i8 to {dst}")
             continue
@@ -113,9 +139,6 @@ def _legalize_low_precision_conversions_for_riscv(mlir_source: str) -> str:
             continue
 
         rewritten.append(line)
-
-    if not helper_decls:
-        return mlir_source.replace("f4E2M1FN", "i8")
 
     output: list[str] = []
     inserted = False
@@ -220,9 +243,7 @@ def _legalize_unsupported_math_ops_for_riscv(mlir_source: str) -> str:
                 shifted = _ssa_suffix(result, f"ctpop_shift_{shift}")
                 summed = _ssa_suffix(result, f"ctpop_sum_{shift}")
                 rewritten.append(f"{indent}{shift_amount} = arith.constant {shift} : {dtype}")
-                rewritten.append(
-                    f"{indent}{shifted} = arith.shrui {current}, {shift_amount} : {dtype}"
-                )
+                rewritten.append(f"{indent}{shifted} = arith.shrui {current}, {shift_amount} : {dtype}")
                 rewritten.append(f"{indent}{summed} = arith.addi {current}, {shifted} : {dtype}")
                 current = summed
             final_mask = _ssa_suffix(result, "ctpop_final_mask")
@@ -305,10 +326,7 @@ def _build_pipeline(pass_names: tuple[str, ...]) -> Pipeline:
 
 
 def build_debug_pipeline() -> Pipeline:
-    return _build_pipeline(
-        _PRE_LOW_PRECISION_LEGALIZATION_PASSES
-        + _POST_LOW_PRECISION_LEGALIZATION_PASSES
-    )
+    return _build_pipeline(_PRE_LOW_PRECISION_LEGALIZATION_PASSES + _POST_LOW_PRECISION_LEGALIZATION_PASSES)
 
 
 def lower_to_llvm_dialect_mlir(value: Any, *, pipeline: Pipeline | None = None) -> str:
@@ -354,7 +372,7 @@ def _emit_llc_artifact(
     with tempfile.TemporaryDirectory(prefix="tilelang-riscv-") as temp_dir:
         temp_dir_path = Path(temp_dir)
         ll_path = temp_dir_path / "kernel.ll"
-        out_path = temp_dir_path / f"kernel.{ 's' if filetype == 'asm' else 'o' }"
+        out_path = temp_dir_path / f"kernel.{'s' if filetype == 'asm' else 'o'}"
         ll_path.write_text(llvm_ir)
         _run_checked(
             [

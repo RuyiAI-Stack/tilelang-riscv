@@ -456,6 +456,9 @@ private:
     for (auto buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
+    for (const auto &match : op->match_buffers) {
+      buffer_data_to_buffer_.Set(match->buffer->data, match->buffer);
+    }
     if (op->annotations.count(attr::kSafeValueMap)) {
       auto map = op->annotations.Get(attr::kSafeValueMap)
                      ->as<Map<Var, PrimExpr>>()
@@ -469,7 +472,21 @@ private:
         annotated_safe_value_by_data_.Set(var, safe_value);
       }
     }
-    return IRMutatorWithAnalyzer::VisitStmt_(op);
+    // Buffer regions describe views, not executed loads. Rewriting a load in
+    // a dynamic region extent without rewriting the matching buffer shape
+    // breaks MatchBufferRegion's shape invariant. Legalize executable code
+    // only and keep the block's buffer/view declarations intact.
+    for (const auto &iv : op->iter_vars) {
+      analyzer_->Bind(iv->var, iv->dom);
+      iter_vars_.Set(iv->var, iv->dom);
+    }
+    Block block = ffi::GetRef<Block>(op);
+    auto *node = block.CopyOnWrite();
+    if (op->init.defined()) {
+      node->init = VisitStmt(op->init.value());
+    }
+    node->body = VisitStmt(op->body);
+    return block;
   }
 
   // Get the safe value of the buffer

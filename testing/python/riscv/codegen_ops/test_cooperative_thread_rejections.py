@@ -299,7 +299,7 @@ def _let_wrapped_lane_dependent_sync_warp_loop_kernel():
             end = T.alloc_local((1,), "int32")
             start[0] = warp * 64
             end[0] = warp * 64 + 57
-            with T.LetStmt((end[0] + 31) // 32 * 32) as aligned_end:
+            with T.LetStmt((end[0] + 31) // 32 * 32) as aligned_end:  # noqa: SIM117 - preserve nested TIR scopes
                 with T.LetStmt(T.uint32(1 << lane) + T.uint32(1 << lane) - T.uint32(1)) as lane_mask:
                     with T.LetStmt(~lane_mask) as lane_mask_rev:
                         for i in T.serial(start[0] + lane, aligned_end, 32):
@@ -325,9 +325,7 @@ def _shfl_sync_kernel():
 
 def _shfl_sync_dynamic_source_lane_kernel():
     @T.prim_func
-    def shfl_sync_dynamic_source_lane_probe(
-        A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")
-    ):
+    def shfl_sync_dynamic_source_lane_probe(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             source_lane = tid // 2 * 2
@@ -350,9 +348,7 @@ def _shfl_sync_local_value_kernel():
 
 def _shfl_sync_guarded_local_value_kernel():
     @T.prim_func
-    def shfl_sync_guarded_local_value_probe(
-        A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")
-    ):
+    def shfl_sync_guarded_local_value_probe(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             tmp = T.alloc_local((1,), "int32")
@@ -365,9 +361,7 @@ def _shfl_sync_guarded_local_value_kernel():
 
 def _shfl_sync_loop_local_value_kernel():
     @T.prim_func
-    def shfl_sync_loop_local_value_probe(
-        A: T.Tensor((8,), "int32"), B: T.Tensor((4,), "int32")
-    ):
+    def shfl_sync_loop_local_value_probe(A: T.Tensor((8,), "int32"), B: T.Tensor((4,), "int32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             tmp = T.alloc_local((1,), "int32")
@@ -381,9 +375,7 @@ def _shfl_sync_loop_local_value_kernel():
 
 def _shfl_sync_dynamic_loop_local_value_kernel():
     @T.prim_func
-    def shfl_sync_dynamic_loop_local_value_probe(
-        A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")
-    ):
+    def shfl_sync_dynamic_loop_local_value_probe(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             tmp = T.alloc_local((1,), "int32")
@@ -397,9 +389,7 @@ def _shfl_sync_dynamic_loop_local_value_kernel():
 
 def _shfl_sync_loop_float_local_value_kernel():
     @T.prim_func
-    def shfl_sync_loop_float_local_value_probe(
-        A: T.Tensor((8,), "float32"), B: T.Tensor((4,), "float32")
-    ):
+    def shfl_sync_loop_float_local_value_probe(A: T.Tensor((8,), "float32"), B: T.Tensor((4,), "float32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             tmp = T.alloc_local((1,), "float32")
@@ -436,9 +426,7 @@ def _shfl_xor_local_value_kernel():
 
 def _shfl_xor_loop_local_value_kernel():
     @T.prim_func
-    def shfl_xor_loop_local_value_probe(
-        A: T.Tensor((8,), "int32"), B: T.Tensor((4,), "int32")
-    ):
+    def shfl_xor_loop_local_value_probe(A: T.Tensor((8,), "int32"), B: T.Tensor((4,), "int32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             tmp = T.alloc_local((1,), "int32")
@@ -452,9 +440,7 @@ def _shfl_xor_loop_local_value_kernel():
 
 def _shfl_xor_dynamic_loop_local_value_kernel():
     @T.prim_func
-    def shfl_xor_dynamic_loop_local_value_probe(
-        A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")
-    ):
+    def shfl_xor_dynamic_loop_local_value_probe(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             tmp = T.alloc_local((1,), "int32")
@@ -558,9 +544,7 @@ def _warp_reduce_loop_local_value_kernel():
 
 def _warp_reduce_dynamic_loop_local_value_kernel():
     @T.prim_func
-    def warp_reduce_dynamic_loop_local_value_probe(
-        A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")
-    ):
+    def warp_reduce_dynamic_loop_local_value_probe(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             tmp = T.alloc_local((1,), "int32")
@@ -624,9 +608,7 @@ def _warp_reduce_bitxor_kernel():
 
 def _warp_reduce_max_local_vector_kernel():
     @T.prim_func
-    def warp_reduce_max_local_vector_probe(
-        A: T.Tensor((8,), "int32"), B: T.Tensor((4,), "int32")
-    ):
+    def warp_reduce_max_local_vector_probe(A: T.Tensor((8,), "int32"), B: T.Tensor((4,), "int32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             vals = T.alloc_local((2,), "int32")
@@ -643,9 +625,7 @@ def _warp_reduce_max_local_vector_kernel():
 
 def _warp_reduce_max_float_local_vector_kernel():
     @T.prim_func
-    def warp_reduce_max_float_local_vector_probe(
-        A: T.Tensor((8,), "float32"), B: T.Tensor((4,), "float32")
-    ):
+    def warp_reduce_max_float_local_vector_probe(A: T.Tensor((8,), "float32"), B: T.Tensor((4,), "float32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             vals = T.alloc_local((2,), "float32")
@@ -662,9 +642,7 @@ def _warp_reduce_max_float_local_vector_kernel():
 
 def _warp_reduce_sum_thread_index_helper_kernel():
     @T.prim_func
-    def warp_reduce_sum_thread_index_helper_probe(
-        A: T.Tensor((4, 2, 32, 4), "float32"), B: T.Tensor((256,), "float32")
-    ):
+    def warp_reduce_sum_thread_index_helper_probe(A: T.Tensor((4, 2, 32, 4), "float32"), B: T.Tensor((256,), "float32")):
         with T.Kernel(1, threads=256):
             tid = T.get_thread_binding()
             lane = T.get_lane_idx()
@@ -685,9 +663,7 @@ def _warp_reduce_sum_thread_index_helper_kernel():
 
 def _warp_reduce_sum_self_store_kernel():
     @T.prim_func
-    def warp_reduce_sum_self_store_probe(
-        A: T.Tensor((8,), "float32"), B: T.Tensor((4,), "float32")
-    ):
+    def warp_reduce_sum_self_store_probe(A: T.Tensor((8,), "float32"), B: T.Tensor((4,), "float32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             tmp = T.alloc_local((1,), "float32")
@@ -702,9 +678,7 @@ def _warp_reduce_sum_self_store_kernel():
 
 def _warp_reduce_max_self_store_kernel():
     @T.prim_func
-    def warp_reduce_max_self_store_probe(
-        A: T.Tensor((8,), "float32"), B: T.Tensor((4,), "float32")
-    ):
+    def warp_reduce_max_self_store_probe(A: T.Tensor((8,), "float32"), B: T.Tensor((4,), "float32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             vals = T.alloc_local((2,), "float32")
@@ -722,9 +696,7 @@ def _warp_reduce_max_self_store_kernel():
 
 def _warp_reduce_sum_self_store_shared_phase_kernel():
     @T.prim_func
-    def warp_reduce_sum_self_store_shared_phase_probe(
-        A: T.Tensor((2, 64), "float32"), B: T.Tensor((2, 64), "float32")
-    ):
+    def warp_reduce_sum_self_store_shared_phase_probe(A: T.Tensor((2, 64), "float32"), B: T.Tensor((2, 64), "float32")):
         with T.Kernel(1, threads=64):
             tid = T.get_thread_binding()
             lane = T.get_lane_idx()
@@ -824,9 +796,7 @@ def _match_all_kernel():
 
 def _match_all_non_linear_index_kernel():
     @T.prim_func
-    def match_all_non_linear_index_probe(
-        A: T.Tensor((8,), "uint32"), B: T.Tensor((4,), "uint32")
-    ):
+    def match_all_non_linear_index_probe(A: T.Tensor((8,), "uint32"), B: T.Tensor((4,), "uint32")):
         with T.Kernel(1, threads=4):
             tid = T.get_thread_binding()
             B[tid] = T.match_all_sync(A[tid * 2])
@@ -1531,9 +1501,8 @@ def test_thread_invariant_shared_sync_phases_execute_once_per_cta():
 
     assert "tvm_storage_sync" not in source
     assert source.count("scf.parallel") == 3
-    # Only the two unit-extent y/z thread dimensions remain around each
-    # phase; the four-lane x launch must not replay the complete T.Parallel.
-    assert source.count("scf.for") == 6
+    # The entire thread-invariant launch runs once, including all barriers.
+    assert source.count("scf.for") == 2
 
 
 def test_mixed_shared_local_alloc_sync_threads_lowers_when_local_is_phase_private():

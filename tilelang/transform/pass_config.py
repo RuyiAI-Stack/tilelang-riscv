@@ -55,6 +55,9 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
+    TL_DISABLE_SHARED_MEMORY_REUSE = "tl.disable_shared_memory_reuse"
+    """Give shared allocations distinct offsets in the merged arena. Default: False"""
+
     TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
     """
         Enable fast math optimization. Default: False

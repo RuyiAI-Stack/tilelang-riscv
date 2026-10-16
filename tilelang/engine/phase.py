@@ -145,6 +145,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.InjectAssumes()(mod)
         mod = tilelang.transform.Simplify()(mod)
         mod = tilelang.transform.LowerAccessPtr()(mod)
+        # Access-pointer operands must remain BufferLoads until pointer lowering.
+        mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
         mod = tilelang.transform.Simplify()(mod)
         mod = tilelang.transform.HoistNonRestrictParams()(mod)
         return mod

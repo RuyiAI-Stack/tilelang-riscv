@@ -101,6 +101,29 @@ module {
     assert "llvm.fpext" not in llvm_mlir
 
 
+def test_riscv_fp4_constants_preserve_all_encodings():
+    values = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+    values += [-v for v in values]
+    statements = []
+    for i, value in enumerate(values):
+        statements.extend(
+            [
+                f"%i{i} = arith.constant {i} : index",
+                f"%v{i} = arith.constant {value:.6e} : f4E2M1FN",
+                f"memref.store %v{i}, %out[%i{i}] : memref<16xf4E2M1FN>",
+            ]
+        )
+    source = "module {\n func.func @fp4_constants(%out: memref<16xf4E2M1FN>) {\n"
+    source += "\n".join(statements) + "\n return\n }\n}\n"
+    library = load_host_module(source)
+    try:
+        out = np.full(16, -1, dtype=np.int8)
+        library(out)
+        np.testing.assert_array_equal(out, np.arange(16, dtype=np.int8))
+    finally:
+        library.close()
+
+
 def test_riscv_legalizes_copysign_and_ctpop_without_external_helpers():
     source = """
 module {
@@ -152,6 +175,30 @@ def test_riscv_qemu_builder_emits_freestanding_elf(tmp_path):
     assert built == exe_path
     assert exe_path.is_file()
     assert exe_path.read_bytes().startswith(b"\x7fELF")
+
+
+@pytest.mark.parametrize("bits", [8, 16, 32, 64])
+def test_riscv_unsigned_memref_preserves_high_bits_and_output_writes(bits):
+    _, rt_mod = _build_mlir_module(
+        f"""
+# from tvm.script import tir as T
+@T.prim_func
+def unsigned_shift(A: T.Buffer((4,), "uint{bits}"), B: T.Buffer((4,), "uint{bits}")):
+    for i in T.serial(4):
+        B[i] = T.shift_right(A[i], T.uint{bits}(1))
+""",
+        "unsigned_shift",
+    )
+    data = np.array([0, 1, 1 << (bits - 1), (1 << bits) - 1], dtype=f"uint{bits}")
+    out = np.zeros_like(data)
+    library = load_host_module(rt_mod)
+    try:
+        library(data, out)
+        np.testing.assert_array_equal(out, data >> 1)
+        with pytest.raises(TypeError, match="Expected"):
+            library(data.astype(np.float32), out)
+    finally:
+        library.close()
 
 
 def test_riscv_kernel_adapter_executes_copy_on_cpu_torch():

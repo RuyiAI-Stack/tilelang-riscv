@@ -189,6 +189,7 @@ def _emit_ptr_to_memref_helpers(llvm_ir: str) -> str:
 
 
 def _emit_f8_conversion_helpers(llvm_ir: str) -> str:
+    """Emit E4M3 casts with nearest-even rounding and finite saturation."""
     needed = {
         "tilelang_riscv_f8e4m3fnuz_to_f32": "tilelang_riscv_f8e4m3fnuz_to_f32" in llvm_ir,
         "tilelang_riscv_f32_to_f8e4m3fnuz": "tilelang_riscv_f32_to_f8e4m3fnuz" in llvm_ir,
@@ -212,8 +213,8 @@ def _emit_f8_conversion_helpers(llvm_ir: str) -> str:
         "}",
         "",
         "static float tilelang_riscv_decode_e4m3(uint8_t raw, int bias, int fnuz) {",
-        "  if ((raw & 0x7f) == 0) return 0.0f;",
-        "  if (fnuz && raw == 0x80) return 0.0f;",
+        '  if (fnuz ? raw == 0x80 : (raw & 0x7f) == 0x7f) return __builtin_nanf("");',
+        "  if ((raw & 0x7f) == 0) return (raw & 0x80) ? -0.0f : 0.0f;",
         "  int sign = (raw & 0x80) ? -1 : 1;",
         "  int exp = (raw >> 3) & 0x0f;",
         "  int mant = raw & 0x07;",
@@ -227,20 +228,24 @@ def _emit_f8_conversion_helpers(llvm_ir: str) -> str:
         "}",
         "",
         "static uint8_t tilelang_riscv_encode_e4m3(float value, int bias, int fnuz) {",
-        "  if (!(value == value) || value == 0.0f) return 0;",
-        "  float best_diff = 3.4028234663852886e38f;",
+        "  uint8_t sign = __builtin_signbit(value) ? 0x80 : 0;",
+        "  if (!(value == value)) return fnuz ? 0x80 : (sign | 0x7f);",
+        "  float magnitude = __builtin_fabsf(value);",
+        "  uint8_t max_code = fnuz ? 0x7f : 0x7e;",
+        "  float max_value = tilelang_riscv_decode_e4m3(max_code, bias, fnuz);",
+        "  if (magnitude >= max_value) return sign | max_code;",
+        "  float best_diff = magnitude;",
         "  uint8_t best = 0;",
-        "  for (int code = 0; code < 256; ++code) {",
-        "    if (fnuz && code == 0x80) continue;",
+        "  for (int code = 1; code <= max_code; ++code) {",
         "    float decoded = tilelang_riscv_decode_e4m3((uint8_t)code, bias, fnuz);",
-        "    float diff = decoded - value;",
+        "    float diff = decoded - magnitude;",
         "    if (diff < 0.0f) diff = -diff;",
         "    if (diff < best_diff || (diff == best_diff && (code & 1) == 0 && (best & 1) != 0)) {",
         "      best_diff = diff;",
         "      best = (uint8_t)code;",
         "    }",
         "  }",
-        "  return best;",
+        "  return (fnuz && best == 0) ? 0 : (sign | best);",
         "}",
         "",
     ]
@@ -248,7 +253,7 @@ def _emit_f8_conversion_helpers(llvm_ir: str) -> str:
         definitions.extend(
             [
                 "float tilelang_riscv_f8e4m3fnuz_to_f32(uint8_t raw) {",
-                "  return tilelang_riscv_decode_e4m3(raw, 7, 1);",
+                "  return tilelang_riscv_decode_e4m3(raw, 8, 1);",
                 "}",
                 "",
             ]
@@ -257,7 +262,7 @@ def _emit_f8_conversion_helpers(llvm_ir: str) -> str:
         definitions.extend(
             [
                 "uint8_t tilelang_riscv_f32_to_f8e4m3fnuz(float value) {",
-                "  return tilelang_riscv_encode_e4m3(value, 7, 1);",
+                "  return tilelang_riscv_encode_e4m3(value, 8, 1);",
                 "}",
                 "",
             ]
@@ -516,6 +521,10 @@ def resolve_host_triple() -> str:
 
 def _normalize_memref_array(spec: _MemRefParam, value: Any) -> np.ndarray:
     array = np.asarray(value)
+    # MLIR's signless integer storage also represents TIR unsigned buffers.
+    # Preserve the bit pattern and shared storage (including output writes).
+    if array.dtype.kind == "u" and spec.dtype.kind == "i" and array.dtype.itemsize == spec.dtype.itemsize:
+        array = array.view(spec.dtype)
     if array.dtype != spec.dtype:
         raise TypeError(f"Expected {spec.dtype} for {spec.mlir_type}, but got {array.dtype}")
     if array.ndim != spec.rank:
@@ -525,9 +534,7 @@ def _normalize_memref_array(spec: _MemRefParam, value: Any) -> np.ndarray:
     expected_shape = _physical_memref_shape(spec)
     for expected_dim, actual_dim in zip(expected_shape, array.shape):
         if expected_dim is not None and expected_dim != actual_dim:
-            raise ValueError(
-                f"Expected shape {expected_shape} for {spec.mlir_type}, but got {tuple(int(dim) for dim in array.shape)}"
-            )
+            raise ValueError(f"Expected shape {expected_shape} for {spec.mlir_type}, but got {tuple(int(dim) for dim in array.shape)}")
     return array
 
 
@@ -584,9 +591,7 @@ def _resolve_command_parts(command: str | list[str] | tuple[str, ...]) -> list[s
         raise RiscvRunnerNotFoundError("Empty RISC-V runner command")
     resolved = shutil.which(parts[0]) if not os.path.isabs(parts[0]) else parts[0]
     if resolved is None:
-        raise RiscvRunnerNotFoundError(
-            f"RISC-V runner `{parts[0]}` not found. Install qemu-user or set TILELANG_RISCV_RUNNER."
-        )
+        raise RiscvRunnerNotFoundError(f"RISC-V runner `{parts[0]}` not found. Install qemu-user or set TILELANG_RISCV_RUNNER.")
     return [resolved, *parts[1:]]
 
 
@@ -606,8 +611,7 @@ def resolve_riscv_runner(
                 if not required:
                     return None
                 raise RiscvRunnerNotFoundError(
-                    "RISC-V runner `qemu-riscv64` not found. Install qemu-user or set "
-                    "`TILELANG_RISCV_RUNNER=\"spike pk\"`."
+                    'RISC-V runner `qemu-riscv64` not found. Install qemu-user or set `TILELANG_RISCV_RUNNER="spike pk"`.'
                 )
             cmd = [qemu]
         if os.environ.get("TILELANG_RISCV_RUNNER_FLAGS"):
@@ -648,8 +652,7 @@ def resolve_riscv_linker(*, required: bool = True) -> Path | None:
 
     if required:
         raise ToolchainNotFoundError(
-            "No RISC-V linker found. Build the vendored LLVM toolchain with lld enabled or set "
-            "TILELANG_RISCV_LINKER to a cross linker."
+            "No RISC-V linker found. Build the vendored LLVM toolchain with lld enabled or set TILELANG_RISCV_LINKER to a cross linker."
         )
     return None
 
@@ -935,9 +938,7 @@ def build_host_shared_library(
         helper_source = _emit_host_helper_source(llvm_ir)
         opt_level = os.environ.get("TILELANG_RISCV_CLANG_OPT_LEVEL", "2").lower()
         if opt_level not in {"0", "1", "2", "3", "s", "z"}:
-            raise RiscvRunnerError(
-                "TILELANG_RISCV_CLANG_OPT_LEVEL must be one of 0, 1, 2, 3, s, or z"
-            )
+            raise RiscvRunnerError("TILELANG_RISCV_CLANG_OPT_LEVEL must be one of 0, 1, 2, 3, s, or z")
         cmd = [
             str(resolve_tool("clang")),
             "-shared",
@@ -995,7 +996,7 @@ class HostKernelLibrary:
             self._owned_tempdir = None
 
     def __del__(self) -> None:
-        try:
+        try:  # noqa: SIM105 - ignore errors during interpreter teardown
             self.close()
         except Exception:
             pass

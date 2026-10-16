@@ -35,6 +35,7 @@
 #endif
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/pattern.h>
 #include <tvm/ir/attrs.h>
 #include <tvm/node/structural_equal.h>
 #include <tvm/runtime/device_api.h>
@@ -105,7 +106,8 @@ bool ContainsDirectLoopBreak(const tir::Stmt &stmt) {
   if (!stmt.defined()) {
     return false;
   }
-  if (stmt.as<tir::ForNode>() != nullptr) {
+  if (stmt.as<tir::ForNode>() != nullptr ||
+      stmt.as<tir::WhileNode>() != nullptr) {
     return false;
   }
   if (const auto *seq = stmt.as<tir::SeqStmtNode>()) {
@@ -211,6 +213,12 @@ bool IsSupportedUnaryIntrinsicCall(const tir::CallNode *op) {
     return IsIntegerLikeType(op->args[0].dtype()) &&
            IsIntegerLikeType(op->dtype);
   }
+  if (op_node->name == "tir.clz") {
+    return IsIntegerLikeType(op->args[0].dtype()) &&
+           IsIntegerLikeType(op->dtype) && op->args[0].dtype().lanes() == 1 &&
+           op->dtype.lanes() == 1 && op->dtype.bits() == 32 &&
+           op->args[0].dtype().bits() <= 64;
+  }
   if (op_node->name == "tir.bitwise_not") {
     return IsIntegerLikeType(op->args[0].dtype()) &&
            IsIntegerLikeType(op->dtype);
@@ -279,7 +287,37 @@ void RejectUnsupportedReinterpretCall(const tir::CallNode *op) {
                 "an explicit RISC-V runtime and memory model.";
 }
 
+bool IsSupportedIEEEFmaCall(const tir::CallNode *op) {
+  if (!op->op.same_as(tl::ieee_fmaf()) || op->args.size() != 4) {
+    return false;
+  }
+  const auto *rounding = op->args[3].as<tir::StringImmNode>();
+  return rounding != nullptr && rounding->value == "rn" &&
+         op->dtype.is_float() &&
+         (op->dtype.bits() == 32 || op->dtype.bits() == 64) &&
+         op->args[0].dtype() == op->dtype && op->args[1].dtype() == op->dtype &&
+         op->args[2].dtype() == op->dtype;
+}
+
+bool IsSupportedIEEEReciprocalCall(const tir::CallNode *op) {
+  if (!op->op.same_as(tl::ieee_frcp()) || op->args.size() != 2) {
+    return false;
+  }
+  const auto *rounding = op->args[1].as<tir::StringImmNode>();
+  return rounding != nullptr && rounding->value == "rn" &&
+         op->dtype.is_float() &&
+         (op->dtype.bits() == 32 || op->dtype.bits() == 64) &&
+         op->args[0].dtype() == op->dtype;
+}
+
 bool IsSupportedBinaryIntrinsicCall(const tir::CallNode *op) {
+  if (op->op.same_as(tl::ieee_fdiv()) && op->args.size() == 3) {
+    const auto *rounding = op->args[2].as<tir::StringImmNode>();
+    return rounding != nullptr && rounding->value == "rn" &&
+           op->dtype.is_float() &&
+           (op->dtype.bits() == 32 || op->dtype.bits() == 64) &&
+           op->args[0].dtype() == op->dtype && op->args[1].dtype() == op->dtype;
+  }
   if (op->args.size() != 2) {
     return false;
   }
@@ -605,6 +643,19 @@ bool IsAtomicAddOffsetCallExtern(const tir::CallNode *op) {
          GetCallExternName(op) == "tl_atomic_add_offset";
 }
 
+bool IsSupportedUInt32BinaryCallExtern(const tir::CallNode *op) {
+  if (op == nullptr || !op->op.same_as(tir::builtin::call_extern()) ||
+      (GetCallExternName(op) != "__umulhi" &&
+       GetCallExternName(op) != "__vmaxu2") ||
+      op->args.size() != 3U) {
+    return false;
+  }
+  const DataType lhs = op->args[1].dtype();
+  const DataType rhs = op->args[2].dtype();
+  return lhs == DataType::UInt(32) && rhs == DataType::UInt(32) &&
+         op->dtype == DataType::UInt(32);
+}
+
 bool IsSerializedNoOpCallExternName(const std::string &extern_name) {
   return extern_name == "tl::fp8_transpose_v_128x224_fa3_src_ldsm_stsm_barrier_"
                         "each_iter" ||
@@ -727,6 +778,52 @@ mlir::Value CreateIntegerConstant(mlir::OpBuilder &builder, mlir::Location loc,
   return builder.create<mlir::arith::ConstantIntOp>(loc, type, value);
 }
 
+mlir::Value LowerSupportedUInt32BinaryCallExtern(mlir::OpBuilder &builder,
+                                                 mlir::Location loc,
+                                                 const tir::CallNode *op,
+                                                 mlir::Value lhs,
+                                                 mlir::Value rhs) {
+  ICHECK(IsSupportedUInt32BinaryCallExtern(op))
+      << "Expected supported uint32 binary call_extern";
+  mlir::Type type = lhs.getType();
+  mlir::Value mask = CreateIntegerConstant(builder, loc, type, 0xFFFF);
+  mlir::Value lhs_lo = builder.create<mlir::arith::AndIOp>(loc, lhs, mask);
+  mlir::Value rhs_lo = builder.create<mlir::arith::AndIOp>(loc, rhs, mask);
+  mlir::Value lhs_hi = builder.create<mlir::arith::ShRUIOp>(
+      loc, lhs, CreateIntegerConstant(builder, loc, type, 16));
+  mlir::Value rhs_hi = builder.create<mlir::arith::ShRUIOp>(
+      loc, rhs, CreateIntegerConstant(builder, loc, type, 16));
+  if (GetCallExternName(op) == "__vmaxu2") {
+    // Unsigned maximum independently in the two packed 16-bit lanes.
+    mlir::Value lo = builder.create<mlir::arith::MaxUIOp>(loc, lhs_lo, rhs_lo);
+    mlir::Value hi = builder.create<mlir::arith::MaxUIOp>(loc, lhs_hi, rhs_hi);
+    hi = builder.create<mlir::arith::ShLIOp>(
+        loc, hi, CreateIntegerConstant(builder, loc, type, 16));
+    return builder.create<mlir::arith::OrIOp>(loc, lo, hi);
+  }
+  mlir::Value p0 = builder.create<mlir::arith::MulIOp>(loc, lhs_lo, rhs_lo);
+  mlir::Value p1 = builder.create<mlir::arith::MulIOp>(loc, lhs_lo, rhs_hi);
+  mlir::Value p2 = builder.create<mlir::arith::MulIOp>(loc, lhs_hi, rhs_lo);
+  mlir::Value p3 = builder.create<mlir::arith::MulIOp>(loc, lhs_hi, rhs_hi);
+  mlir::Value low_cross = builder.create<mlir::arith::AddIOp>(
+      loc, builder.create<mlir::arith::AndIOp>(loc, p1, mask),
+      builder.create<mlir::arith::AndIOp>(loc, p2, mask));
+  low_cross = builder.create<mlir::arith::AddIOp>(
+      loc, low_cross,
+      builder.create<mlir::arith::ShRUIOp>(
+          loc, p0, CreateIntegerConstant(builder, loc, type, 16)));
+  mlir::Value carry = builder.create<mlir::arith::ShRUIOp>(
+      loc, low_cross, CreateIntegerConstant(builder, loc, type, 16));
+  mlir::Value high_cross = builder.create<mlir::arith::AddIOp>(
+      loc,
+      builder.create<mlir::arith::ShRUIOp>(
+          loc, p1, CreateIntegerConstant(builder, loc, type, 16)),
+      builder.create<mlir::arith::ShRUIOp>(
+          loc, p2, CreateIntegerConstant(builder, loc, type, 16)));
+  high_cross = builder.create<mlir::arith::AddIOp>(loc, high_cross, carry);
+  return builder.create<mlir::arith::AddIOp>(loc, p3, high_cross);
+}
+
 mlir::Value LowerSupportedUnaryMathCall(mlir::OpBuilder &builder,
                                         mlir::Location loc,
                                         const tir::CallNode *op,
@@ -836,6 +933,33 @@ mlir::Value LowerSupportedUnaryIntrinsicCall(mlir::OpBuilder &builder,
   if (op_node->name == "tir.popcount") {
     return builder.create<mlir::math::CtPopOp>(loc, arg);
   }
+  if (op_node->name == "tir.clz") {
+    auto integer_type = mlir::dyn_cast<mlir::IntegerType>(arg.getType());
+    ICHECK(integer_type) << "tir.clz expects an integer in riscv lowering";
+    const unsigned width = integer_type.getWidth();
+    mlir::Value spread = arg;
+    for (unsigned shift = 1; shift < width; shift <<= 1) {
+      mlir::Value amount =
+          CreateIntegerConstant(builder, loc, arg.getType(), shift);
+      mlir::Value shifted =
+          builder.create<mlir::arith::ShRUIOp>(loc, spread, amount);
+      spread = builder.create<mlir::arith::OrIOp>(loc, spread, shifted);
+    }
+    mlir::Value all_ones =
+        CreateIntegerConstant(builder, loc, arg.getType(), -1);
+    mlir::Value inverted =
+        builder.create<mlir::arith::XOrIOp>(loc, spread, all_ones);
+    mlir::Value count = builder.create<mlir::math::CtPopOp>(loc, inverted);
+    mlir::Type result_type = builder.getIntegerType(op->dtype.bits());
+    auto result_integer_type = mlir::cast<mlir::IntegerType>(result_type);
+    if (width < static_cast<unsigned>(result_integer_type.getWidth())) {
+      return builder.create<mlir::arith::ExtUIOp>(loc, result_type, count);
+    }
+    if (width > static_cast<unsigned>(result_integer_type.getWidth())) {
+      return builder.create<mlir::arith::TruncIOp>(loc, result_type, count);
+    }
+    return count;
+  }
   if (op_node->name == "tir.bitwise_not") {
     mlir::Value all_ones =
         CreateIntegerConstant(builder, loc, arg.getType(), -1);
@@ -909,6 +1033,12 @@ mlir::Value LowerSupportedBinaryIntrinsicCall(mlir::OpBuilder &builder,
                                               mlir::Value rhs) {
   ICHECK(IsSupportedBinaryIntrinsicCall(op))
       << "Unsupported TIR intrinsic in riscv lowering: " << op->op;
+  if (op->op.same_as(tl::ieee_fdiv())) {
+    // Ordinary LLVM division preserves IEEE semantics without fast-math flags.
+    // Directed rounding modes require constrained FP operations and are
+    // rejected.
+    return builder.create<mlir::arith::DivFOp>(loc, lhs, rhs);
+  }
   if (op->op.same_as(tir::builtin::bitwise_and())) {
     return builder.create<mlir::arith::AndIOp>(loc, lhs, rhs);
   }
@@ -1067,6 +1197,7 @@ private:
     const tir::IterVarNode *iter_var{nullptr};
     std::optional<int64_t> extent;
     bool body_uses_iter_var{false};
+    bool single_execution{false};
   };
 
   struct ThreadLocalBlockAllocBinding {
@@ -1326,6 +1457,9 @@ private:
         return MatchAddressOfBufferLoad(op->args[1]).has_value() &&
                VisitExpr(op->args[2]) && VisitExpr(op->args[3]);
       }
+      if (IsSupportedUInt32BinaryCallExtern(op)) {
+        return VisitExpr(op->args[1]) && VisitExpr(op->args[2]);
+      }
       if (IsMatchSyncCallExtern(op)) {
         ICHECK_EQ(op->args.size(), 3U)
             << GetCallExternName(op)
@@ -1353,6 +1487,13 @@ private:
       }
       if (IsSupportedBinaryIntrinsicCall(op)) {
         return VisitExpr(op->args[0]) && VisitExpr(op->args[1]);
+      }
+      if (IsSupportedIEEEFmaCall(op)) {
+        return VisitExpr(op->args[0]) && VisitExpr(op->args[1]) &&
+               VisitExpr(op->args[2]);
+      }
+      if (IsSupportedIEEEReciprocalCall(op)) {
+        return VisitExpr(op->args[0]);
       }
       return false;
     }
@@ -1605,6 +1746,14 @@ private:
       if (IsAtomicAddOffsetCallExtern(op)) {
         return outer_->LowerAtomicAddOffsetCallExtern(op);
       }
+      if (IsSupportedUInt32BinaryCallExtern(op)) {
+        mlir::Value lhs = outer_->CastValue(
+            VisitExpr(op->args[1]), op->args[1].dtype(), DataType::UInt(32));
+        mlir::Value rhs = outer_->CastValue(
+            VisitExpr(op->args[2]), op->args[2].dtype(), DataType::UInt(32));
+        return LowerSupportedUInt32BinaryCallExtern(outer_->builder_,
+                                                    outer_->loc_, op, lhs, rhs);
+      }
       if (IsMatchSyncCallExtern(op) &&
           outer_->CanLowerCooperativeCallAsSingleThread(op)) {
         return outer_->LowerSingleThreadCooperativeCall(op);
@@ -1649,6 +1798,18 @@ private:
                                             op->args[0].dtype(), op->dtype);
         return LowerSupportedUnaryMathCall(outer_->builder_, outer_->loc_, op,
                                            arg);
+      }
+      if (IsSupportedIEEEFmaCall(op)) {
+        return outer_->builder_.create<mlir::math::FmaOp>(
+            outer_->loc_, VisitExpr(op->args[0]), VisitExpr(op->args[1]),
+            VisitExpr(op->args[2]));
+      }
+      if (IsSupportedIEEEReciprocalCall(op)) {
+        mlir::Value denominator = VisitExpr(op->args[0]);
+        mlir::Value one = CreateFloatConstant(outer_->builder_, outer_->loc_,
+                                              denominator.getType(), 1.0);
+        return outer_->builder_.create<mlir::arith::DivFOp>(outer_->loc_, one,
+                                                            denominator);
       }
       if (IsSupportedUnaryIntrinsicCall(op)) {
         mlir::Value arg = outer_->CastValue(
@@ -2456,8 +2617,16 @@ private:
       return false;
     }
     bool found = false;
-    tir::PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    std::function<void(const ObjectRef &)> visit = [&](const ObjectRef &node) {
       if (found) {
+        return;
+      }
+      if (const auto *var = node.as<tir::VarNode>()) {
+        PrimExpr original = tvm::ffi::GetRef<tir::Var>(var);
+        PrimExpr resolved = ResolveBoundPrimExpr(original);
+        if (!resolved.same_as(original)) {
+          tir::PostOrderVisit(resolved, visit);
+        }
         return;
       }
       const auto *load = node.as<tir::BufferLoadNode>();
@@ -2468,7 +2637,8 @@ private:
                           [&](const tir::Buffer &buffer) {
                             return SameBuffer(load->buffer, buffer);
                           });
-    });
+    };
+    tir::PostOrderVisit(stmt, visit);
     return found;
   }
 
@@ -2687,7 +2857,7 @@ private:
              "serialized thread index "
           << "in riscv lowering: " << buffer->name;
       ValidateContiguousBuffer(buffer);
-      mlir::Value alloc = CreateAlloca(buffer->shape, buffer->dtype);
+      mlir::Value alloc = CreateAlloca(buffer);
       BindBufferAliases(buffer, alloc, &saved->buffer_bindings,
                         &saved->buffer_owners);
       if (buffer->dtype.lanes() > 1) {
@@ -2812,9 +2982,23 @@ private:
   std::vector<SerializedWarpShuffleSnapshotBinding>
   CreateSerializedWarpShuffleSnapshots(
       const tir::Stmt &stmt,
-      llvm::ArrayRef<ThreadLocalBlockAllocBinding> thread_local_bindings) {
+      llvm::ArrayRef<ThreadLocalBlockAllocBinding> thread_local_bindings,
+      bool exclude_loop_operands = false) {
     std::unordered_set<const Object *> operands =
         CollectCooperativeReplayOperandBuffers(stmt);
+    if (exclude_loop_operands) {
+      // A nested loop can initialize/update its operands on every iteration.
+      // Its collectives need iteration-level replay, not a phase-entry
+      // snapshot.
+      tir::PostOrderVisit(stmt, [&](const ObjectRef &node) {
+        if (const auto *loop = node.as<tir::ForNode>()) {
+          for (const Object *operand :
+               CollectCooperativeReplayOperandBuffers(loop->body)) {
+            operands.erase(operand);
+          }
+        }
+      });
+    }
     std::vector<SerializedWarpShuffleSnapshotBinding> snapshots;
     for (const ThreadLocalBlockAllocBinding &binding : thread_local_bindings) {
       if (operands.count(binding.buffer.get()) == 0 &&
@@ -2823,8 +3007,7 @@ private:
       }
       mlir::MemRefType backing_type =
           mlir::cast<mlir::MemRefType>(binding.backing.getType());
-      mlir::Value snapshot =
-          builder_.create<mlir::memref::AllocaOp>(loc_, backing_type);
+      mlir::Value snapshot = CreateScratchAlloca(backing_type);
       snapshots.push_back(SerializedWarpShuffleSnapshotBinding{
           binding.buffer, binding.backing, snapshot});
     }
@@ -2919,7 +3102,11 @@ private:
   }
 
   bool InNonUnitLogicalThreadRegion() const {
-    return HasNonUnitLaunchExtent(thread_launch_stack_);
+    return std::any_of(thread_launch_stack_.begin(), thread_launch_stack_.end(),
+                       [](const ThreadLaunchFrame &frame) {
+                         return frame.extent.value_or(0) != 1 &&
+                                !frame.single_execution;
+                       });
   }
 
   bool InNonUnitLogicalThreadRegionThatUsesThreadVar() const {
@@ -3014,9 +3201,9 @@ private:
     if (StmtUsesVar(body, thread_var)) {
       return false;
     }
-    if (StmtContainsPhaseBoundarySyncDeep(body)) {
-      return false;
-    }
+    // Whole-tile operations already cover every lane. When no explicit or
+    // implicit thread index is used, shared barriers are satisfied by the
+    // single ordered execution, including barriers in nested branches/loops.
     if (StmtContainsImplicitThreadSensitiveOp(body)) {
       return false;
     }
@@ -3319,7 +3506,7 @@ private:
         return;
       }
       if (GetSerializedWarpShuffleKind(call).has_value() &&
-          call->args.size() == 4U) {
+          call->args.size() >= 4U) {
         collect_load_buffer(call->args[1]);
       }
     });
@@ -3424,8 +3611,9 @@ private:
   void SetSerializedWarpReplayTrackedBufferExpr(const tir::Buffer &buffer,
                                                 const PrimExpr &expr) {
     SetSerializedWarpReplayTrackedBufferElementExpr(buffer, 0, expr);
-    serialized_warp_replay_buffer_exprs_[buffer.get()] = expr;
-    serialized_warp_replay_buffer_exprs_[buffer->data.get()] = expr;
+    PrimExpr typed_expr = CastSerializedWarpReplayTrackedExpr(buffer, expr);
+    serialized_warp_replay_buffer_exprs_[buffer.get()] = typed_expr;
+    serialized_warp_replay_buffer_exprs_[buffer->data.get()] = typed_expr;
   }
 
   void ClearSerializedWarpReplayTrackedBufferExpr(const tir::Buffer &buffer) {
@@ -4372,7 +4560,8 @@ private:
     int64_t trip_count = 0;
     int64_t min_value = 0;
     int64_t step_value = 0;
-    return InNonUnitLogicalThreadRegion() &&
+    return track_serialized_warp_replay_exprs_ &&
+           InNonUnitLogicalThreadRegion() &&
            GetStaticSerializedWarpReplayLoopInfo(op, &trip_count, &min_value,
                                                  &step_value) &&
            StmtMayAffectSerializedWarpReplay(op->body);
@@ -4663,11 +4852,23 @@ private:
           current_phase_shared_writes.clear();
           continue;
         }
-        if (!current_phase.empty() &&
-            StmtReadsAnySharedBuffer(child, current_phase_shared_writes)) {
-          saw_sync = true;
-          PushNonEmptyPhase(&current_phase, phases);
-          current_phase_shared_writes.clear();
+        if (!current_phase.empty()) {
+          std::vector<tir::Buffer> child_shared_writes;
+          CollectSharedBufferStores(child, &child_shared_writes);
+          bool overwrites_phase_reads = std::any_of(
+              current_phase.begin(), current_phase.end(),
+              [&](const tir::Stmt &earlier) {
+                return StmtReadsAnySharedBuffer(earlier, child_shared_writes);
+              });
+          // Complete all lanes' reads before a later instruction overwrites
+          // shared state. A lane updating a shared selection threshold must
+          // not change the threshold still being read by subsequent lanes.
+          if (overwrites_phase_reads ||
+              StmtReadsAnySharedBuffer(child, current_phase_shared_writes)) {
+            saw_sync = true;
+            PushNonEmptyPhase(&current_phase, phases);
+            current_phase_shared_writes.clear();
+          }
         }
         if (!current_phase.empty() &&
             StmtContainsCooperativeThreadIntrinsic(child)) {
@@ -4706,6 +4907,14 @@ private:
           current_phase.push_back(child_phases.front());
           CollectSharedBufferStores(child_phases.front(),
                                     &current_phase_shared_writes);
+          // Keep a collective loop separate from its consumers. This lets a
+          // surrounding lane predicate be lifted into each loop iteration,
+          // instead of running all shuffle stages for lane zero first.
+          if (StmtContainsCooperativeThreadIntrinsic(child_phases.front())) {
+            saw_sync = true;
+            PushNonEmptyPhase(&current_phase, phases);
+            current_phase_shared_writes.clear();
+          }
           continue;
         }
 
@@ -4758,14 +4967,49 @@ private:
 
     if (const auto *let = stmt.as<tir::LetStmtNode>()) {
       std::vector<tir::Stmt> body_phases;
-      if (!SplitAtSharedStorageSync(let->body, &body_phases, unsupported_reason,
-                                    cross_phase_local_buffers,
-                                    thread_var_for_phase_global)) {
+      // Dependency checks inside the body must see shared reads hidden by
+      // enclosing scalar lets, without evaluating those lets outside a lane.
+      std::optional<PrimExpr> saved_expr =
+          SaveAndSetPrimExpr(bound_prim_exprs_, let->var.get(), let->value);
+      bool split = SplitAtSharedStorageSync(
+          let->body, &body_phases, unsupported_reason,
+          cross_phase_local_buffers, thread_var_for_phase_global);
+      RestorePrimExprBinding(bound_prim_exprs_, let->var.get(), saved_expr);
+      if (!split) {
         return false;
       }
       AppendTrailingNoOpPhaseIfNeeded(
           &body_phases, StmtEndsWithPhaseBoundarySync(
                             let->body, thread_var_for_phase_global));
+      std::vector<tir::Buffer> body_shared_writes;
+      CollectSharedBufferStores(let->body, &body_shared_writes);
+      bool reads_modified_shared = StmtReadsAnySharedBuffer(
+          tir::Evaluate(let->value), body_shared_writes);
+      if (body_phases.size() > 1 && reads_modified_shared &&
+          !let->var.dtype().is_handle()) {
+        // A let is evaluated once. Rebuilding it around every phase would
+        // reload shared state after earlier phases have modified it.
+        // Snapshot all lanes before executing any of the body's phases.
+        if (cross_phase_local_buffers == nullptr) {
+          if (unsupported_reason != nullptr && unsupported_reason->empty()) {
+            *unsupported_reason =
+                "shared-memory let crosses serialized thread phases "
+                "without thread-local backing storage";
+          }
+          return false;
+        }
+        tir::Buffer snapshot =
+            tir::decl_buffer({Integer(1)}, let->var.dtype(),
+                             let->var->name_hint + "_phase_value", "local.var");
+        AppendUniqueBuffer(snapshot, cross_phase_local_buffers);
+        ffi::Map<tir::Var, PrimExpr> substitution;
+        substitution.Set(let->var, tir::BufferLoad(snapshot, {Integer(0)}));
+        phases->push_back(tir::BufferStore(snapshot, let->value, {Integer(0)}));
+        for (const tir::Stmt &phase : body_phases) {
+          phases->push_back(tir::Substitute(phase, substitution));
+        }
+        return true;
+      }
       phases->reserve(body_phases.size());
       for (const tir::Stmt &phase : body_phases) {
         phases->push_back(tir::LetStmt(let->var, let->value, phase, let->span));
@@ -7328,15 +7572,40 @@ private:
 
   void BindDynamicShapeVars(const tir::Buffer &buffer, mlir::Value value) {
     for (size_t i = 0; i < buffer->shape.size(); ++i) {
-      const auto *dim_var = buffer->shape[i].as<tir::VarNode>();
-      if (dim_var == nullptr || scalar_values_.count(dim_var)) {
+      // Flattened/ragged buffers may expose a symbol only as a*n+b. Recover
+      // that symbol from the descriptor, just as for a bare dynamic extent.
+      Array<tir::Var> vars;
+      tir::PostOrderVisit(buffer->shape[i], [&](const ObjectRef &node) {
+        if (const auto *var = node.as<tir::VarNode>()) {
+          vars.push_back(tvm::ffi::GetRef<tir::Var>(var));
+        }
+      });
+      if (vars.size() != 1 || scalar_values_.count(vars[0].get())) {
+        continue;
+      }
+      auto affine = arith::DetectLinearEquation(buffer->shape[i], vars);
+      if (affine.size() != 2) {
+        continue;
+      }
+      auto scale = GetOptionalStaticInt(affine[0]);
+      auto offset = GetOptionalStaticInt(affine[1]);
+      if (!scale.has_value() || scale.value() <= 0 || !offset.has_value()) {
         continue;
       }
       mlir::Value index =
           ConstantIntLike(static_cast<int64_t>(i), builder_.getIndexType());
       mlir::Value dim =
           builder_.create<mlir::memref::DimOp>(loc_, value, index);
-      scalar_values_[dim_var] = dim;
+      if (offset.value() != 0) {
+        dim = builder_.create<mlir::arith::SubIOp>(
+            loc_, dim,
+            ConstantIntLike(offset.value(), builder_.getIndexType()));
+      }
+      if (scale.value() != 1) {
+        dim = builder_.create<mlir::arith::DivSIOp>(
+            loc_, dim, ConstantIntLike(scale.value(), builder_.getIndexType()));
+      }
+      scalar_values_[vars[0].get()] = dim;
     }
   }
 
@@ -7473,13 +7742,35 @@ private:
         .getResult();
   }
 
+  mlir::Value CreateScratchAlloca(mlir::MemRefType type,
+                                  mlir::ValueRange dynamic_sizes = {},
+                                  mlir::ValueRange symbol_operands = {}) {
+    mlir::OpBuilder::InsertionGuard guard(builder_);
+    if (dynamic_sizes.empty() && symbol_operands.empty()) {
+      // Serialized lanes and blocks can reuse storage at a static allocation
+      // site. Keep it in the function entry: an alloca inside a lowered loop
+      // otherwise consumes more stack every iteration, even at clang -O0.
+      mlir::Operation *parent = builder_.getInsertionBlock()->getParentOp();
+      while (parent != nullptr && !mlir::isa<mlir::func::FuncOp>(parent) &&
+             !mlir::isa<mlir::scf::ParallelOp>(parent)) {
+        parent = parent->getParentOp();
+      }
+      // Do not share an allocation between iterations of a genuinely parallel
+      // region; only the serialized launch/loop storage can be reused.
+      if (parent != nullptr && mlir::isa<mlir::func::FuncOp>(parent)) {
+        builder_.setInsertionPointToStart(&parent->getRegion(0).front());
+      }
+    }
+    return builder_.create<mlir::memref::AllocaOp>(loc_, type, dynamic_sizes,
+                                                   symbol_operands);
+  }
+
   mlir::Value CreateAlloca(const Array<PrimExpr> &shape_exprs,
                            DataType element_dtype) {
     mlir::MemRefType memref_type = LowerMemRefType(element_dtype, shape_exprs);
     llvm::SmallVector<mlir::Value, 4> dynamic_sizes =
         LowerDynamicSizes(shape_exprs);
-    return builder_.create<mlir::memref::AllocaOp>(loc_, memref_type,
-                                                   dynamic_sizes);
+    return CreateScratchAlloca(memref_type, dynamic_sizes);
   }
 
   mlir::Value CreateAlloca(const tir::Buffer &buffer) {
@@ -7488,15 +7779,26 @@ private:
         LowerDynamicSizes(buffer->shape);
     llvm::SmallVector<mlir::Value, 4> symbol_operands =
         LowerDynamicLayoutSymbols(buffer);
-    return builder_.create<mlir::memref::AllocaOp>(
-        loc_, memref_type, dynamic_sizes, symbol_operands);
+    mlir::Value alloc =
+        CreateScratchAlloca(memref_type, dynamic_sizes, symbol_operands);
+    if (tl::IsSharedBuffer(buffer) || buffer.scope() == "local.fragment") {
+      // Give CPU scratch storage deterministic contents. Partially populated
+      // tiles may still participate in a full GEMM with masked accumulators;
+      // stale stack NaNs would otherwise contaminate reductions even when the
+      // corresponding accumulator was initialized to negative infinity. Some
+      // library kernels also accumulate directly into fresh fragment storage.
+      builder_.create<mlir::linalg::FillOp>(
+          loc_, mlir::ValueRange{CreateZeroValue(buffer->dtype)},
+          mlir::ValueRange{alloc});
+    }
+    return alloc;
   }
 
   mlir::Value CreateStaticAlloca(llvm::ArrayRef<int64_t> shape,
                                  DataType element_dtype) {
     mlir::MemRefType memref_type =
         mlir::MemRefType::get(shape, LowerScalarType(element_dtype));
-    return builder_.create<mlir::memref::AllocaOp>(loc_, memref_type);
+    return CreateScratchAlloca(memref_type);
   }
 
   std::optional<PrimExpr>
@@ -7681,26 +7983,22 @@ private:
       return else_builder();
     }
 
-    mlir::Value result_slot = CreateStaticAlloca({1}, result_dtype);
-    mlir::Value slot_index = ZeroIndex();
-    llvm::SmallVector<mlir::Value, 1> slot_indices{slot_index};
+    // Return an SSA value directly. A stack slot here would allocate on every
+    // element of a predicated tile, potentially exhausting the stack at -O0.
     mlir::Value cond = LowerCondition(predicate);
-    mlir::scf::IfOp if_op = builder_.create<mlir::scf::IfOp>(loc_, cond, true);
-
+    auto if_op = builder_.create<mlir::scf::IfOp>(
+        loc_, mlir::TypeRange{LowerScalarType(result_dtype)}, cond, true);
     {
       mlir::OpBuilder::InsertionGuard guard(builder_);
-      builder_.setInsertionPoint(if_op.thenYield());
-      builder_.create<mlir::memref::StoreOp>(loc_, then_builder(), result_slot,
-                                             slot_indices);
+      builder_.setInsertionPointToStart(&if_op.getThenRegion().front());
+      builder_.create<mlir::scf::YieldOp>(loc_, then_builder());
     }
     {
       mlir::OpBuilder::InsertionGuard guard(builder_);
-      builder_.setInsertionPoint(if_op.elseYield());
-      builder_.create<mlir::memref::StoreOp>(loc_, else_builder(), result_slot,
-                                             slot_indices);
+      builder_.setInsertionPointToStart(&if_op.getElseRegion().front());
+      builder_.create<mlir::scf::YieldOp>(loc_, else_builder());
     }
-    return builder_.create<mlir::memref::LoadOp>(loc_, result_slot,
-                                                 slot_indices);
+    return if_op.getResult(0);
   }
 
   template <typename F>
@@ -8291,20 +8589,9 @@ private:
       return false;
     }
     for (size_t i = 0; i < region->region.size(); ++i) {
-      std::optional<int64_t> shape_extent =
-          GetOptionalStaticInt(buffer->shape[i]);
-      std::optional<int64_t> region_min =
-          GetOptionalStaticInt(region->region[i]->min);
-      std::optional<int64_t> region_extent =
-          GetOptionalStaticInt(region->region[i]->extent);
-      if (!shape_extent.has_value() || !region_extent.has_value()) {
-        continue;
-      }
-      if (region_extent.value() > shape_extent.value()) {
-        return false;
-      }
-      if (region_min.has_value() &&
-          region_min.value() + region_extent.value() > shape_extent.value()) {
+      const Range &range = region->region[i];
+      if (!analyzer_.CanProve(range->min >= 0) ||
+          !analyzer_.CanProve(range->min + range->extent <= buffer->shape[i])) {
         return false;
       }
     }
@@ -8445,7 +8732,8 @@ private:
   void TrackSerializedWarpReplayTileFill(const tir::BufferRegion &dst_region,
                                          const PrimExpr &fill_expr) {
     const tir::Buffer &buffer = dst_region->buffer;
-    if (!CanTrackSerializedWarpReplayBufferElements(buffer)) {
+    if (!track_serialized_warp_replay_exprs_ ||
+        !CanTrackSerializedWarpReplayBufferElements(buffer)) {
       return;
     }
     PrimExpr resolved_fill_expr = ResolveSerializedWarpReplayExpr(fill_expr);
@@ -8508,6 +8796,45 @@ private:
     FillBufferRegion(dst_region, VisitExpr(op->args[1]), op->args[1].dtype());
   }
 
+  mlir::Value BufferIndicesInBounds(const tir::Buffer &buffer,
+                                    llvm::ArrayRef<mlir::Value> indices) {
+    mlir::Value valid = builder_.create<mlir::arith::ConstantIntOp>(loc_, 1, 1);
+    for (size_t i = 0; i < indices.size(); ++i) {
+      mlir::Value extent =
+          AsIndex(VisitExpr(buffer->shape[i]), buffer->shape[i].dtype());
+      valid = BoolAnd(valid, IndexGe(indices[i], ZeroIndex()));
+      valid = BoolAnd(valid, IndexLt(indices[i], extent));
+    }
+    return valid;
+  }
+
+  void CopyBufferElement(const tir::Buffer &src_buffer, mlir::Value src_memref,
+                         llvm::ArrayRef<mlir::Value> src_indices,
+                         const tir::Buffer &dst_buffer, mlir::Value dst_memref,
+                         llvm::ArrayRef<mlir::Value> dst_indices) {
+    // Tile copies zero-pad input tails and discard output tails. A dynamic
+    // subview is not evidence that an entire tile lies within its parent.
+    mlir::Value dst_valid = BufferIndicesInBounds(dst_buffer, dst_indices);
+    mlir::scf::IfOp store_if =
+        builder_.create<mlir::scf::IfOp>(loc_, dst_valid, false);
+    mlir::OpBuilder::InsertionGuard guard(builder_);
+    builder_.setInsertionPointToStart(store_if.thenBlock());
+    mlir::Value src_valid = BufferIndicesInBounds(src_buffer, src_indices);
+    auto load_if = builder_.create<mlir::scf::IfOp>(
+        loc_, src_valid,
+        [&](mlir::OpBuilder &b, mlir::Location loc) {
+          mlir::Value value =
+              b.create<mlir::memref::LoadOp>(loc, src_memref, src_indices);
+          value = CastValue(value, src_buffer->dtype, dst_buffer->dtype);
+          b.create<mlir::scf::YieldOp>(loc, value);
+        },
+        [&](mlir::OpBuilder &b, mlir::Location loc) {
+          b.create<mlir::scf::YieldOp>(loc, CreateZeroValue(dst_buffer->dtype));
+        });
+    builder_.create<mlir::memref::StoreOp>(loc_, load_if.getResult(0),
+                                           dst_memref, dst_indices);
+  }
+
   void LowerBufferRegionCopy(const tir::BufferRegion &src_region,
                              const tir::BufferRegion &dst_region) {
     const tir::Buffer &src_buffer = src_region->buffer;
@@ -8544,11 +8871,8 @@ private:
 
         llvm::SmallVector<mlir::Value, 4> dst_indices =
             LowerRegionIndices(dst_region, coords);
-        mlir::Value value = builder_.create<mlir::memref::LoadOp>(
-            loc_, src_memref, src_indices);
-        value = CastValue(value, src_buffer->dtype, dst_buffer->dtype);
-        builder_.create<mlir::memref::StoreOp>(loc_, value, dst_memref,
-                                               dst_indices);
+        CopyBufferElement(src_buffer, src_memref, src_indices, dst_buffer,
+                          dst_memref, dst_indices);
       });
       return;
     }
@@ -8567,7 +8891,9 @@ private:
              "in riscv";
     }
 
-    if (src_buffer->dtype == dst_buffer->dtype) {
+    if (src_buffer->dtype == dst_buffer->dtype &&
+        RegionSubviewFitsStaticShape(src_region) &&
+        RegionSubviewFitsStaticShape(dst_region)) {
       builder_.create<mlir::memref::CopyOp>(loc_,
                                             CreateLogicalSubview(src_region),
                                             CreateLogicalSubview(dst_region));
@@ -8580,12 +8906,8 @@ private:
                        LowerLogicalRegionIndices(src_region, coords);
                    llvm::SmallVector<mlir::Value, 4> dst_indices =
                        LowerLogicalRegionIndices(dst_region, coords);
-                   mlir::Value value = builder_.create<mlir::memref::LoadOp>(
-                       loc_, src_memref, src_indices);
-                   value =
-                       CastValue(value, src_buffer->dtype, dst_buffer->dtype);
-                   builder_.create<mlir::memref::StoreOp>(
-                       loc_, value, dst_memref, dst_indices);
+                   CopyBufferElement(src_buffer, src_memref, src_indices,
+                                     dst_buffer, dst_memref, dst_indices);
                  });
   }
 
@@ -9762,6 +10084,15 @@ private:
       if (IsSerializedNoOpCallExternName(extern_name)) {
         return true;
       }
+      if (IsSupportedUInt32BinaryCallExtern(op)) {
+        mlir::Value lhs = CastValue(VisitExpr(op->args[1]), op->args[1].dtype(),
+                                    DataType::UInt(32));
+        mlir::Value rhs = CastValue(VisitExpr(op->args[2]), op->args[2].dtype(),
+                                    DataType::UInt(32));
+        (void)LowerSupportedUInt32BinaryCallExtern(builder_, loc_, op, lhs,
+                                                   rhs);
+        return true;
+      }
       RejectUnsupportedCallExtern(op);
     }
     if (op->op.same_as(tvm::tl::rng_init())) {
@@ -10130,6 +10461,13 @@ private:
       block_launch_stack_.push_back(ThreadLaunchFrame{
           iter_var, GetOptionalStaticInt(extent), body_uses_iter_var});
     }
+    // Expanding local recurrences into symbolic expressions can grow
+    // exponentially; only phases with collectives need source-lane replay.
+    bool saved_tracking = track_serialized_warp_replay_exprs_;
+    if (tracking == LaunchTrackingKind::kThread && body_for_break != nullptr) {
+      track_serialized_warp_replay_exprs_ =
+          StmtContainsCooperativeThreadIntrinsic(*body_for_break);
+    }
     SavedBinding saved = SaveAndSet(scalar_values_, iter_var->var.get(),
                                     for_op.getInductionVar());
     PrimExprMap saved_replay_exprs = serialized_warp_replay_buffer_exprs_;
@@ -10145,6 +10483,7 @@ private:
     serialized_warp_replay_buffer_element_exprs_ =
         std::move(saved_replay_element_exprs);
     RestoreBinding(scalar_values_, iter_var->var.get(), saved);
+    track_serialized_warp_replay_exprs_ = saved_tracking;
     if (tracking == LaunchTrackingKind::kThread) {
       active_thread_local_bindings_stack_.pop_back();
       thread_launch_stack_.pop_back();
@@ -10171,7 +10510,8 @@ private:
 
     thread_launch_stack_.push_back(
         ThreadLaunchFrame{iter_var, GetOptionalStaticInt(extent),
-                          /*body_uses_iter_var=*/false});
+                          /*body_uses_iter_var=*/false,
+                          /*single_execution=*/true});
     active_thread_local_bindings_stack_.emplace_back();
     mlir::Value zero_thread =
         ConstantIntLike(0, LowerScalarType(iter_var->var.dtype()));
@@ -10252,7 +10592,16 @@ private:
     // T.Parallel work that already covers the complete phase (for example the
     // shared-memory FFT butterfly stages). Keep the CTA-scoped shared bindings
     // alive, bind thread-private storage to lane zero, and emit the phase once.
-    if (ShouldCollapseThreadInvariantLaunchBody(phase, iter_var->var) &&
+    // A phase that initializes or consumes storage carried into another phase
+    // must run for every lane, even if its expressions omit threadIdx.
+    // Otherwise only lane zero's fragment/local backing is initialized.
+    bool uses_cross_phase_local =
+        std::any_of(thread_local_bindings.begin(), thread_local_bindings.end(),
+                    [&](const ThreadLocalBlockAllocBinding &binding) {
+                      return StmtUsesBuffer(phase, binding.buffer);
+                    });
+    if (!uses_cross_phase_local &&
+        ShouldCollapseThreadInvariantLaunchBody(phase, iter_var->var) &&
         StmtContainsParallelLoopDeep(phase) &&
         !StmtContainsLoopBreakDeep(phase)) {
       mlir::Value zero_thread =
@@ -10263,10 +10612,19 @@ private:
           [&]() { phase_emitter(phase, zero_thread); });
       return;
     }
+    // Preserve the values seen by a collective before subsequent lane stores.
+    // Loops with collectives manage their own per-iteration values.
+    auto saved_shuffle_snapshots =
+        std::move(serialized_warp_shuffle_snapshots_);
+    serialized_warp_shuffle_snapshots_.clear();
+    auto shuffle_snapshots = CreateSerializedWarpShuffleSnapshots(
+        phase, thread_local_bindings, /*exclude_loop_operands=*/true);
+    ActivateSerializedWarpShuffleSnapshots(shuffle_snapshots);
     EmitThreadLaunchBodyWithBindings(
         phase, iter_var, extent, thread_local_bindings,
         [&](mlir::Value induction_var) { phase_emitter(phase, induction_var); },
         StmtUsesVar(phase, iter_var->var), &phase);
+    serialized_warp_shuffle_snapshots_ = std::move(saved_shuffle_snapshots);
   }
 
   bool CanSplitThreadInvariantSerialLoopAtSharedSync(
@@ -10285,6 +10643,24 @@ private:
          ExprUsesVar(loop->step.value(), thread_iter_var->var))) {
       return false;
     }
+    bool local_bound = false;
+    auto inspect_bound = [&](const PrimExpr &expr) {
+      tir::PostOrderVisit(
+          ResolveBoundPrimExpr(expr), [&](const ObjectRef &node) {
+            if (const auto *load = node.as<tir::BufferLoadNode>()) {
+              local_bound |=
+                  llvm::StringRef(load->buffer.scope()).starts_with("local");
+            }
+          });
+    };
+    inspect_bound(loop->min);
+    inspect_bound(loop->extent);
+    if (loop->step.defined()) {
+      inspect_bound(loop->step.value());
+    }
+    if (local_bound) {
+      return false;
+    }
 
     std::vector<tir::Buffer> cross_phase_local_buffers;
     std::string unsupported_reason;
@@ -10295,7 +10671,8 @@ private:
     }
     bool has_phase_boundary =
         body_phases->size() > 1 ||
-        StmtEndsWithPhaseBoundarySync(loop->body, &thread_iter_var->var);
+        StmtEndsWithPhaseBoundarySync(loop->body, &thread_iter_var->var) ||
+        StmtContainsCooperativeThreadIntrinsic(loop->body);
     if (!has_phase_boundary) {
       return false;
     }
@@ -10413,10 +10790,12 @@ private:
       return nullptr;
     }
     if (const auto *seq = stmt.as<tir::SeqStmtNode>()) {
-      if (seq->seq.empty()) {
+      // Lifting a trailing loop would move its preceding stores/shuffles into
+      // every iteration. Only transparent, single-statement wrappers are safe.
+      if (seq->seq.size() != 1) {
         return nullptr;
       }
-      return MatchCommonLeafThreadLaunchLoop(seq->seq.back(), reference);
+      return MatchCommonLeafThreadLaunchLoop(seq->seq.front(), reference);
     }
     if (const auto *attr = stmt.as<tir::AttrStmtNode>()) {
       if (attr->attr_key == tir::attr::tilelang_assume ||
@@ -10472,19 +10851,8 @@ private:
                                   const tir::ForNode *reference) const {
     ICHECK(reference != nullptr);
     if (const auto *seq = stmt.as<tir::SeqStmtNode>()) {
-      ICHECK(!seq->seq.empty());
-      tir::Stmt stripped_tail =
-          StripCommonLeafThreadLaunchLoop(seq->seq.back(), reference);
-      if (seq->seq.size() == 1) {
-        return stripped_tail;
-      }
-      ffi::Array<tir::Stmt> rebuilt_seq;
-      rebuilt_seq.reserve(seq->seq.size());
-      for (size_t i = 0; i + 1 < seq->seq.size(); ++i) {
-        rebuilt_seq.push_back(seq->seq[i]);
-      }
-      rebuilt_seq.push_back(stripped_tail);
-      return tir::SeqStmt(rebuilt_seq, seq->span);
+      ICHECK_EQ(seq->seq.size(), 1);
+      return StripCommonLeafThreadLaunchLoop(seq->seq.front(), reference);
     }
     if (const auto *attr = stmt.as<tir::AttrStmtNode>()) {
       if (attr->attr_key == tir::attr::tilelang_assume ||
@@ -10628,13 +10996,25 @@ private:
     mlir::Value lower;
     mlir::Value extent;
     mlir::Value step;
-    EmitWithLetBindings(let_bindings, [&]() {
-      lower = AsIndex(VisitExpr(loop->min), loop->min.dtype());
-      extent = AsIndex(VisitExpr(loop->extent), loop->extent.dtype());
-      step = loop->step.defined() ? AsIndex(VisitExpr(loop->step.value()),
-                                            loop->step.value().dtype())
-                                  : ConstantIntLike(1, builder_.getIndexType());
-    });
+    // Only evaluate expressions needed by the loop bounds here. Other enclosing
+    // lets can load thread-local buffers and must stay inside each lane's
+    // phase.
+    ffi::Map<tir::Var, PrimExpr> bound_substitutions;
+    for (const tir::LetStmtNode *let : let_bindings) {
+      bound_substitutions.Set(let->var,
+                              tir::Substitute(let->value, bound_substitutions));
+    }
+    PrimExpr lower_expr = tir::Substitute(loop->min, bound_substitutions);
+    PrimExpr extent_expr = tir::Substitute(loop->extent, bound_substitutions);
+    lower = AsIndex(VisitExpr(lower_expr), lower_expr.dtype());
+    extent = AsIndex(VisitExpr(extent_expr), extent_expr.dtype());
+    if (loop->step.defined()) {
+      PrimExpr step_expr =
+          tir::Substitute(loop->step.value(), bound_substitutions);
+      step = AsIndex(VisitExpr(step_expr), step_expr.dtype());
+    } else {
+      step = ConstantIntLike(1, builder_.getIndexType());
+    }
     mlir::Value upper =
         builder_.create<mlir::arith::AddIOp>(loc_, lower, extent);
 
@@ -10782,8 +11162,7 @@ private:
           loc_, mlir::arith::CmpIPredicate::ult, thread_value, thread_upper);
       mlir::MemRefType lane_round_slot_type =
           mlir::MemRefType::get({1}, index_type);
-      mlir::Value lane_round_slot =
-          builder_.create<mlir::memref::AllocaOp>(loc_, lane_round_slot_type);
+      mlir::Value lane_round_slot = CreateScratchAlloca(lane_round_slot_type);
       llvm::SmallVector<mlir::Value, 1> lane_round_slot_indices{zero};
       builder_.create<mlir::memref::StoreOp>(loc_, zero, lane_round_slot,
                                              lane_round_slot_indices);
@@ -10915,6 +11294,60 @@ private:
           return TryEmitThreadLaunchNestedSerialLoopPhases(
               lifted_loop, thread_iter_var, thread_extent, phase_emitter,
               existing_thread_local_bindings, active_let_bindings);
+        }
+      }
+      // A uniform branch may contain a serial loop whose body has CTA
+      // barriers. Keep the branch outside the serialized lane loop, then
+      // split each nested loop at its barriers. Replaying the branch once per
+      // lane would reach a barrier while other lanes have not run yet.
+      // Resolve only the lets the condition needs. Other enclosing lets may
+      // read lane-local storage, which is not bound outside a lane phase.
+      ffi::Map<tir::Var, PrimExpr> condition_substitutions;
+      for (const tir::LetStmtNode *let : active_let_bindings) {
+        condition_substitutions.Set(
+            let->var, tir::Substitute(let->value, condition_substitutions));
+      }
+      PrimExpr condition_expr =
+          tir::Substitute(if_node->condition, condition_substitutions);
+      if (!ExprUsesVar(condition_expr, thread_iter_var->var) &&
+          HasNestedThreadLaunchSplitLoop(stmt, thread_iter_var)) {
+        bool local_condition = false;
+        tir::PostOrderVisit(condition_expr, [&](const ObjectRef &node) {
+          if (const auto *load = node.as<tir::BufferLoadNode>()) {
+            const std::string scope = load->buffer.scope();
+            local_condition |= llvm::StringRef(scope).starts_with("local");
+          }
+        });
+        if (!local_condition) {
+          auto emit_branch = [&](const tir::Stmt &branch) {
+            if (TryEmitThreadLaunchNestedSerialLoopPhases(
+                    branch, thread_iter_var, thread_extent, phase_emitter,
+                    existing_thread_local_bindings, active_let_bindings)) {
+              return;
+            }
+            EmitPerThreadLaunchPhase(
+                branch, thread_iter_var, thread_extent,
+                existing_thread_local_bindings,
+                [&](const tir::Stmt &phase, mlir::Value induction_var) {
+                  EmitWithLetBindings(active_let_bindings, [&]() {
+                    phase_emitter(phase, induction_var);
+                  });
+                });
+          };
+          mlir::Value condition = LowerCondition(condition_expr);
+          mlir::scf::IfOp branch_op = builder_.create<mlir::scf::IfOp>(
+              loc_, condition, if_node->else_case.defined());
+          {
+            mlir::OpBuilder::InsertionGuard guard(builder_);
+            builder_.setInsertionPoint(branch_op.thenYield());
+            emit_branch(if_node->then_case);
+          }
+          if (if_node->else_case.defined()) {
+            mlir::OpBuilder::InsertionGuard guard(builder_);
+            builder_.setInsertionPoint(branch_op.elseYield());
+            emit_branch(if_node->else_case.value());
+          }
+          return true;
         }
       }
     }
@@ -11288,6 +11721,73 @@ private:
     LowerLoopBody(op, for_op.getInductionVar());
   }
 
+  void VisitStmt_(const tir::WhileNode *op) final {
+    const tir::Stmt stmt = tvm::ffi::GetRef<tir::Stmt>(op);
+    ICHECK(!(InNonUnitLogicalThreadRegion() &&
+             (StmtContainsPhaseBoundarySyncDeep(stmt) ||
+              StmtContainsCooperativeThreadIntrinsic(stmt))))
+        << "Cross-thread synchronization or shuffle inside while is not "
+           "supported in riscv lowering";
+
+    const bool has_direct_break = ContainsDirectLoopBreak(op->body);
+    if (has_direct_break) {
+      mlir::Value flag = CreateStaticAlloca({1}, DataType::Bool());
+      StoreBreakLoopFlag(flag, false);
+      break_loop_stack_.push_back(BreakLoopFrame{flag});
+    }
+
+    // An iteration may execute any number of times. Do not replay expressions
+    // captured from one iteration as if they described the final buffer state.
+    auto invalidated =
+        CollectSerializedWarpReplayTrackedBuffersWritten(op->body);
+    PrimExprMap saved_exprs = serialized_warp_replay_buffer_exprs_;
+    auto saved_element_exprs = serialized_warp_replay_buffer_element_exprs_;
+    const bool saved_tracking = track_serialized_warp_replay_exprs_;
+    track_serialized_warp_replay_exprs_ = false;
+    auto while_op = builder_.create<mlir::scf::WhileOp>(loc_, mlir::TypeRange{},
+                                                        mlir::ValueRange{});
+    {
+      mlir::OpBuilder::InsertionGuard guard(builder_);
+      builder_.createBlock(&while_op.getBefore());
+      mlir::Value condition;
+      if (has_direct_break) {
+        mlir::Value broken = LoadBreakLoopFlag(CurrentBreakLoopFlag());
+        auto if_op = builder_.create<mlir::scf::IfOp>(
+            loc_, mlir::TypeRange{builder_.getI1Type()}, broken, true);
+        {
+          mlir::OpBuilder::InsertionGuard branch_guard(builder_);
+          builder_.setInsertionPointToStart(&if_op.getThenRegion().front());
+          builder_.create<mlir::scf::YieldOp>(
+              loc_, ConstantIntLike(0, builder_.getI1Type()));
+          builder_.setInsertionPointToStart(&if_op.getElseRegion().front());
+          builder_.create<mlir::scf::YieldOp>(loc_,
+                                              LowerCondition(op->condition));
+        }
+        condition = if_op.getResult(0);
+      } else {
+        condition = LowerCondition(op->condition);
+      }
+      builder_.create<mlir::scf::ConditionOp>(loc_, condition,
+                                              mlir::ValueRange{});
+      builder_.createBlock(&while_op.getAfter());
+      VisitStmt(op->body);
+      builder_.create<mlir::scf::YieldOp>(loc_);
+    }
+    track_serialized_warp_replay_exprs_ = saved_tracking;
+    serialized_warp_replay_buffer_exprs_ = std::move(saved_exprs);
+    serialized_warp_replay_buffer_element_exprs_ =
+        std::move(saved_element_exprs);
+    for (const tir::Buffer &buffer : invalidated) {
+      ClearSerializedWarpReplayTrackedBufferElementExprs(buffer);
+      if (IsSerializedWarpReplayTrackedScalarBuffer(buffer)) {
+        ClearSerializedWarpReplayTrackedBufferExpr(buffer);
+      }
+    }
+    if (has_direct_break) {
+      break_loop_stack_.pop_back();
+    }
+  }
+
   void VisitStmt_(const tir::IfThenElseNode *op) final {
     if (InLogicalThreadRegion() && IsSimpleThreadReturnIf(op)) {
       return;
@@ -11360,7 +11860,7 @@ private:
 
     std::optional<int64_t> tracked_linear_index;
     bool track_replay_expr =
-        !op->predicate.defined() &&
+        track_serialized_warp_replay_exprs_ && !op->predicate.defined() &&
         (tracked_linear_index = GetSerializedWarpReplayStaticBufferLinearIndex(
              op->buffer, op->indices))
             .has_value();
@@ -12164,6 +12664,14 @@ private:
         if (IsAtomicAddOffsetCallExtern(op)) {
           return LowerAtomicAddOffsetCallExtern(op);
         }
+        if (IsSupportedUInt32BinaryCallExtern(op)) {
+          mlir::Value lhs = CastValue(VisitExpr(op->args[1]),
+                                      op->args[1].dtype(), DataType::UInt(32));
+          mlir::Value rhs = CastValue(VisitExpr(op->args[2]),
+                                      op->args[2].dtype(), DataType::UInt(32));
+          return LowerSupportedUInt32BinaryCallExtern(builder_, loc_, op, lhs,
+                                                      rhs);
+        }
         if (IsMatchSyncCallExtern(op) &&
             CanLowerCooperativeCallAsSingleThread(op)) {
           return LowerSingleThreadCooperativeCall(op);
@@ -12283,6 +12791,17 @@ private:
           CastValue(VisitExpr(op->args[0]), op->args[0].dtype(), op->dtype);
       return LowerSupportedUnaryMathCall(builder_, loc_, op, arg);
     }
+    if (IsSupportedIEEEFmaCall(op)) {
+      return builder_.create<mlir::math::FmaOp>(loc_, VisitExpr(op->args[0]),
+                                                VisitExpr(op->args[1]),
+                                                VisitExpr(op->args[2]));
+    }
+    if (IsSupportedIEEEReciprocalCall(op)) {
+      mlir::Value denominator = VisitExpr(op->args[0]);
+      mlir::Value one =
+          CreateFloatConstant(builder_, loc_, denominator.getType(), 1.0);
+      return builder_.create<mlir::arith::DivFOp>(loc_, one, denominator);
+    }
     if (IsSupportedUnaryIntrinsicCall(op)) {
       mlir::Value arg = CastValue(VisitExpr(op->args[0]), op->args[0].dtype(),
                                   op->args[0].dtype());
@@ -12329,6 +12848,7 @@ private:
       deferred_loop_bindings_;
   std::unordered_map<const Object *, int> prebound_thread_local_block_buffers_;
   std::unordered_map<const Object *, mlir::Value> active_thread_local_backings_;
+  bool track_serialized_warp_replay_exprs_{true};
   std::unordered_map<const Object *, mlir::Value>
       serialized_warp_shuffle_snapshots_;
   std::unordered_set<std::string> pointer_backed_buffer_view_helpers_;
