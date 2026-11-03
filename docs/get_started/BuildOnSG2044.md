@@ -1,12 +1,12 @@
 # Build and Run on SG2044
 
-This document describes the validated native bring-up flow for the structured RISC-V backend on an SG2044 machine.
-It is intentionally separate from the generic installation guide because this path uses a real RISC-V host, a Buddy
-/ LLVM toolchain, and a native GCC sysroot instead of the usual x86 or GPU development environment.
+This document describes a reproducible native bring-up flow for the structured RISC-V backend on an SG2044 machine.
+It is intentionally separate from the generic installation guide because this path uses a real RISC-V host, Buddy
+MLIR, and a native GCC sysroot instead of the usual x86 or GPU development environment.
 
 ## Scope
 
-The validated flow is:
+The intended flow is:
 
 - `TileLang -> MLIR Linalg -> MLIR vector / RVV lowering`
 - native host shared library build with the RISC-V GCC toolchain
@@ -16,43 +16,88 @@ This document is about native execution on SG2044.
 
 ## Buddy MLIR Version
 
-The RISC-V backend is validated against the current stable Buddy MLIR release
-as of October 16, 2026,
-`release/v0.1.0` (commit `2860a0e135966387e22c48e61105c99a824ef7fe`). It uses
-LLVM/MLIR 24.0.0git from the `llvm` submodule at
-`3845a20590afedfbece4d000f97a6cfbbea3bf43`. The backend links to LLVM/MLIR
-directly and does not use Buddy-specific libraries. CMake requires LLVM/MLIR
-24.0 to catch unsupported toolchains during configuration.
+The October 28 native operator tests used Buddy MLIR
+[`release/v0.1.2`](https://github.com/buddy-compiler/buddy-mlir/releases/tag/release/v0.1.2).
+The release tag resolves to `60f354a7b659a1ce36fdf9ba7bd97fdbf6bb0e5f` and pins
+its LLVM submodule to `3845a20590afedfbece4d000f97a6cfbbea3bf43`. The separate compiler CI uses the Buddy `release/v0.1.0` x86_64 LLVM/MLIR
+archive, which pins the same LLVM revision. Both builds require LLVM/MLIR 24.0;
+this native guide does not change the CI toolchain.
 
-Clone the pinned Buddy release and its LLVM source before building the
-toolchain:
+Clone the release and verify that Git checked out its pinned LLVM revision:
 
 ```bash
-git clone --depth 1 --branch release/v0.1.0 \
-  https://github.com/buddy-compiler/buddy-mlir.git
+git clone https://github.com/buddy-compiler/buddy-mlir.git
 cd buddy-mlir
+git checkout 60f354a7b659a1ce36fdf9ba7bd97fdbf6bb0e5f
 git submodule update --init llvm
-test "$(git rev-parse HEAD)" = "2860a0e135966387e22c48e61105c99a824ef7fe"
-test "$(git -C llvm rev-parse HEAD)" = "3845a20590afedfbece4d000f97a6cfbbea3bf43"
+test "$(git -C llvm rev-parse HEAD)" = 3845a20590afedfbece4d000f97a6cfbbea3bf43
 ```
 
-Use a checkout of the matching LLVM submodule for the build steps in Buddy's
-[RVV environment guide](https://github.com/buddy-compiler/buddy-mlir/blob/release/v0.1.0/docs/RVVEnvironment.md).
-The generic installation steps below apply to this pinned release.
+Create and activate a Python 3.12+ environment before configuring either build.
+Install the compiler's Python build dependencies and the release's supported
+RISC-V Torch version:
 
-For x86_64 compiler and codegen validation, the release also provides the
-`llvm-24.0.0git-cp312-abi3-manylinux_2_28_x86_64.tar.gz` asset. Extract it and
-set `TILELANG_RISCV_LLVM_ROOT` to the extracted directory. Use the matching
-RISC-V asset or a source build on SG2044 when native execution is required.
+```bash
+python3.13 -m venv ~/.venv-buddy
+source ~/.venv-buddy/bin/activate
+pip install --extra-index-url https://ruyirepo.ruyicommunity.cn/pypi/simple/ \
+  torch==2.10.0 'numpy>=2,<2.5' 'nanobind>=2.9,<3' \
+  scikit-build-core cython setuptools_scm cloudpickle pytest z3-solver ml-dtypes psutil
+```
+
+Set `CC` and `CXX` to the native GCC executables. If GCC uses a separate
+`lib64/lp64d` layout, export its directories in both `LIBRARY_PATH` (link time)
+and `LD_LIBRARY_PATH` (execution time) before running CMake. See the environment
+example below. A source build of `z3-solver` can take several minutes on RISC-V.
+
+Build LLVM/MLIR and Buddy MLIR:
+
+```bash
+cmake -G Ninja -S llvm/llvm -B llvm/build \
+  -DLLVM_ENABLE_PROJECTS="mlir;clang" \
+  -DLLVM_ENABLE_RUNTIMES="openmp" \
+  -DLLVM_TARGETS_TO_BUILD="host;RISCV" \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DOPENMP_ENABLE_LIBOMPTARGET=OFF \
+  -DCMAKE_BUILD_TYPE=RELEASE \
+  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+  -DLLVM_ENABLE_ZSTD=OFF \
+  -DPython3_EXECUTABLE="$(which python)" \
+  -DPython_EXECUTABLE="$(which python)"
+ninja -C llvm/build
+
+cmake -G Ninja -S . -B build \
+  -DMLIR_DIR="$PWD/llvm/build/lib/cmake/mlir" \
+  -DLLVM_DIR="$PWD/llvm/build/lib/cmake/llvm" \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DCMAKE_BUILD_TYPE=RELEASE \
+  -DBUDDY_MLIR_ENABLE_PYTHON_PACKAGES=ON \
+  -DBUDDY_PACKAGE_VERSION=0.1.2 \
+  -DPython3_EXECUTABLE="$(which python)" \
+  -DPython_EXECUTABLE="$(which python)"
+ninja -C build buddy-opt buddy-translate
+```
+
+`LLVM_ENABLE_ZSTD=OFF` avoids a mismatch between system zstd headers and a
+separate GCC sysroot. Compression support is optional for this pipeline.
+The Buddy compiler tools above do not require its optional model dependencies;
+install the release's `requirements.txt` when using its model importer.
+
+Set `TILELANG_RISCV_LLVM_ROOT` to `buddy-mlir/llvm/build` for this build.
+Record `git rev-parse HEAD`, `git -C llvm rev-parse HEAD`, and
+`llvm/build/bin/llvm-config --version` with each SG2044 test report.
 
 ## Get the Sources
 
-Clone the repository with its bundled dependencies, including the `TileKernels`
-submodule used by the RISC-V operator-library tests:
+Use this RISC-V checkout on the TileLang 0.1.8 development line. When cloning
+another copy, set `TILELANG_RISCV_REVISION` to the source revision being validated.
+Then initialize its pinned dependencies:
 
 ```bash
 git clone --recursive https://github.com/RuyiAI-Stack/tilelang-riscv.git tilelang-riscv
 cd tilelang-riscv
+git checkout "$TILELANG_RISCV_REVISION"
+git submodule update --init --recursive
 ```
 
 If you already cloned the repository without submodules, run:
@@ -69,18 +114,23 @@ Activate the Python environment and export the toolchain variables:
 source ~/.venv-buddy/bin/activate
 
 export TILELANG_RISCV_LLVM_ROOT=/path/to/buddy-mlir/llvm/build
-export Z3_ROOT=/path/to/.local/z3
+export TILELANG_RISCV_MLIR_MODE=ON
+export TILELANG_RISCV_ABI=lp64d
+export Z3_ROOT="$(python -c 'import pathlib, z3; print(pathlib.Path(z3.__file__).parent)')"
 export CC=/path/to/gcc
 export CXX=/path/to/g++
 export PATH=/path/to/gcc-bin:$TILELANG_RISCV_LLVM_ROOT/bin:$Z3_ROOT/bin:$PATH
 export LIBRARY_PATH=/path/to/gcc-lib64/lp64d:/path/to/gcc-libgcc/lp64d${LIBRARY_PATH:+:$LIBRARY_PATH}
+export LD_LIBRARY_PATH="$LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export TVM_FFI_DISABLE_TORCH_C_DLPACK=1
-export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=OFF -DTILELANG_RISCV_MLIR_MODE=ON"
+export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=OFF"
 ```
 
 Notes:
 
-- `Z3_ROOT` is required when `z3-solver` wheels are unavailable on `riscv64`
+- Buddy MLIR `release/v0.1.2` requires Python 3.12 or newer for its Python packages.
+  The release's supported RISC-V environment uses Torch 2.10.0 from the Ruyi package index.
+- `Z3_ROOT` points to the installed `z3-solver` package, which contains `include` and `lib`
 - if the native toolchain uses a split `lib64/lp64d` layout, include it in
   `LIBRARY_PATH` or CMake's compiler sanity check can fail on `-lgcc_s`
 - `TVM_FFI_DISABLE_TORCH_C_DLPACK=1` avoids first-import JIT building of the optional Torch DLPack extension
@@ -109,14 +159,18 @@ cd tilelang-riscv
 pip install -e . --no-build-isolation -v
 ```
 
+Use the vendored TVM FFI revision with this TVM pin; an unrelated newer FFI
+installation can fail during TVM type registration. The wheel uses the Python
+3.9 stable ABI, matching the project's minimum supported Python and Cython 3.3.
+
 ## Build Notes
 
-The SG2044 path depends on a few implementation details that are already wired into this tree:
+The SG2044 path depends on a few implementation details wired into this tree:
 
 - use `target="riscv"` as the backend name
 - toolchain discovery covers sibling Buddy builds such as `../buddy-mlir/llvm/build`
 - the RISC-V host wrapper passes `--gcc-toolchain` and `--sysroot` when it detects `/opt/gcc-native`
-- RISC-V builds disable TVM's alternative linker selection because `ld.lld` failed on the validated SG2044 toolchain
+- RISC-V builds disable TVM's alternative linker selection because `ld.lld` failed on an SG2044 toolchain
 
 If you need to rebuild after source changes, the same editable install command is sufficient:
 
@@ -127,7 +181,7 @@ pip install -e . --no-build-isolation -v
 
 ## Validation
 
-The validated native test set is:
+Run the native test set against the exact source and toolchain revisions recorded above:
 
 ```bash
 cd tilelang-riscv
@@ -137,6 +191,7 @@ pytest testing/python/riscv/test_riscv_tladapter_pipeline.py -q
 pytest testing/python/riscv/test_riscv_cache.py -q
 pytest testing/python/riscv/codegen_ops -q
 pytest testing/python/riscv/TileKernels -q
+pytest testing/python/riscv/TileOps -q
 ```
 
 Useful extended runtime checks:
@@ -147,8 +202,9 @@ pytest testing/python/riscv/test_riscv_artifact_export.py -q
 ```
 
 `test_riscv_jit_runtime.py` and `test_riscv_artifact_export.py` exercise broader
-runtime and artifact-export paths and may expose additional toolchain or runtime
-issues beyond the smoke set above.
+runtime and artifact-export paths. A test is considered SG2044-validated only
+when its result is recorded from this native host with the source and Buddy/LLVM
+revisions above; x86 results do not establish native RISC-V correctness.
 
 ## Troubleshooting
 

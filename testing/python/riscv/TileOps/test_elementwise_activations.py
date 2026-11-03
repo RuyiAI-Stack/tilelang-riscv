@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from ._harness import get_elementwise_kernel_class, run_unary_runtime_compare
+from ._harness import compile_tileops_kernel, get_elementwise_kernel_class, run_unary_runtime_compare, tileops_kernel_tir
 
 
 @pytest.mark.parametrize(
@@ -110,3 +110,24 @@ def test_unary_float32_runtime_compare(kernel_name, input_factory, reference, rt
         rtol=rtol,
         atol=atol,
     )
+
+
+@pytest.mark.parametrize("dtype,rtol", [(torch.float32, 1e-5), (torch.float16, 1e-3), (torch.bfloat16, 8e-3)])
+@pytest.mark.parametrize("size", [256, 257])
+def test_sigmoid_precision_and_load_paths_runtime_compare(dtype, rtol, size):
+    # Aligned lengths select upstream's streaming vector load; odd lengths
+    # select its generic load and exercise the ragged tail.
+    # Large negative values cover __fdividef's large-divisor/overflow behavior.
+    x = torch.linspace(-12.0, 12.0, size).to(dtype)
+    x[:12] = torch.tensor([-float("inf"), -120.0, -90.0, -88.0, -87.0, -20.0, -0.0, 0.0, 20.0, 88.0, 120.0, float("inf")], dtype=dtype)
+    instance = get_elementwise_kernel_class("SigmoidFwdKernel")(N_total=size, dtype=dtype, config={"threads": 32, "num_per_thread": 8})
+    tir = tileops_kernel_tir(instance).script()
+    assert ("tileops::load16_evict_last" in tir) == (size == 256)
+    before = x.view(torch.uint8).clone()
+    kernel = compile_tileops_kernel(instance)
+    try:
+        expected = torch.sigmoid(x.float()).to(dtype)
+        torch.testing.assert_close(kernel(x), expected, rtol=rtol, atol=0)
+        torch.testing.assert_close(x.view(torch.uint8), before, rtol=0, atol=0)
+    finally:
+        kernel.close()

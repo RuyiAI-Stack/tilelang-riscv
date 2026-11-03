@@ -57,9 +57,9 @@ def test_tool_lookup_falls_back_to_path(monkeypatch, tmp_path):
     assert resolve_tool("mlir-opt") == fake_tool.resolve()
 
 
-def test_missing_toolchain_raises(monkeypatch):
-    monkeypatch.setattr(toolchain, "_LLVM_SUBMODULE_ROOT", Path("/tmp/tilelang-riscv-no-toolchain"))
-    monkeypatch.setattr(toolchain, "_BUDDY_MLIR_ROOT", Path("/tmp/tilelang-riscv-no-buddy"))
+def test_missing_toolchain_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(toolchain, "_LLVM_SUBMODULE_ROOT", tmp_path / "missing-toolchain")
+    monkeypatch.setattr(toolchain, "_BUDDY_MLIR_ROOT", tmp_path / "missing-buddy")
     monkeypatch.delenv("TILELANG_RISCV_LLVM_ROOT", raising=False)
     monkeypatch.delenv("TILELANG_LLVM_INSTALL_DIR", raising=False)
 

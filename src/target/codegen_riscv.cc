@@ -643,6 +643,27 @@ bool IsAtomicAddOffsetCallExtern(const tir::CallNode *op) {
          GetCallExternName(op) == "tl_atomic_add_offset";
 }
 
+bool IsFastFloatDivideCallExtern(const tir::CallNode *op) {
+  return op != nullptr && op->op.same_as(tir::builtin::call_extern()) &&
+         GetCallExternName(op) == "__fdividef" && op->args.size() == 3U &&
+         op->dtype == DataType::Float(32) &&
+         op->args[1].dtype() == DataType::Float(32) &&
+         op->args[2].dtype() == DataType::Float(32);
+}
+
+bool IsStreamingVectorLoadCallExtern(const tir::CallNode *op) {
+  std::string name = GetCallExternName(op);
+  return name == "tileops::load16" || name == "tileops::load16_evict_first" ||
+         name == "tileops::load16_evict_last";
+}
+
+bool IsStreamingScalarLoadCallExtern(const tir::CallNode *op) {
+  std::string name = GetCallExternName(op);
+  return name == "tileops::load_evict_first" ||
+         name == "tileops::load_evict_last" ||
+         name == "tileops::load_f32_evict_last";
+}
+
 bool IsSupportedUInt32BinaryCallExtern(const tir::CallNode *op) {
   if (op == nullptr || !op->op.same_as(tir::builtin::call_extern()) ||
       (GetCallExternName(op) != "__umulhi" &&
@@ -776,6 +797,30 @@ mlir::Value CreateInfinityConstant(mlir::OpBuilder &builder, mlir::Location loc,
 mlir::Value CreateIntegerConstant(mlir::OpBuilder &builder, mlir::Location loc,
                                   mlir::Type type, int64_t value) {
   return builder.create<mlir::arith::ConstantIntOp>(loc, type, value);
+}
+
+mlir::Value LowerFastFloatDivide(mlir::OpBuilder &builder, mlir::Location loc,
+                                 mlir::Value lhs, mlir::Value rhs) {
+  // Use correctly rounded division within CUDA's approximate divide domain.
+  // CUDA specifies zero for a finite numerator and 2^126 < |rhs| < 2^128,
+  // and NaN for an infinite numerator in that range. Dividing by a signed
+  // infinity reproduces those exceptional cases and preserves signed zero.
+  // https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__INTRINSIC__SINGLE.html
+  mlir::Type type = rhs.getType();
+  mlir::Value magnitude = builder.create<mlir::math::AbsFOp>(loc, rhs);
+  mlir::Value infinity = CreateInfinityConstant(builder, loc, type);
+  mlir::Value large = builder.create<mlir::arith::CmpFOp>(
+      loc, mlir::arith::CmpFPredicate::OGT, magnitude,
+      CreateFloatConstant(builder, loc, type, 0x1p126));
+  mlir::Value finite = builder.create<mlir::arith::CmpFOp>(
+      loc, mlir::arith::CmpFPredicate::OLT, magnitude, infinity);
+  mlir::Value exceptional =
+      builder.create<mlir::arith::AndIOp>(loc, large, finite);
+  mlir::Value signed_infinity =
+      builder.create<mlir::math::CopySignOp>(loc, infinity, rhs);
+  mlir::Value divisor = builder.create<mlir::arith::SelectOp>(
+      loc, exceptional, signed_infinity, rhs);
+  return builder.create<mlir::arith::DivFOp>(loc, lhs, divisor);
 }
 
 mlir::Value LowerSupportedUInt32BinaryCallExtern(mlir::OpBuilder &builder,
@@ -1457,7 +1502,8 @@ private:
         return MatchAddressOfBufferLoad(op->args[1]).has_value() &&
                VisitExpr(op->args[2]) && VisitExpr(op->args[3]);
       }
-      if (IsSupportedUInt32BinaryCallExtern(op)) {
+      if (IsFastFloatDivideCallExtern(op) ||
+          IsSupportedUInt32BinaryCallExtern(op)) {
         return VisitExpr(op->args[1]) && VisitExpr(op->args[2]);
       }
       if (IsMatchSyncCallExtern(op)) {
@@ -1745,6 +1791,11 @@ private:
       }
       if (IsAtomicAddOffsetCallExtern(op)) {
         return outer_->LowerAtomicAddOffsetCallExtern(op);
+      }
+      if (IsFastFloatDivideCallExtern(op)) {
+        return LowerFastFloatDivide(outer_->builder_, outer_->loc_,
+                                    VisitExpr(op->args[1]),
+                                    VisitExpr(op->args[2]));
       }
       if (IsSupportedUInt32BinaryCallExtern(op)) {
         mlir::Value lhs = outer_->CastValue(
@@ -9430,6 +9481,91 @@ private:
     return CastValue(loaded, src.buffer->dtype, op->dtype);
   }
 
+  void LowerStreamingVectorLoadCallExtern(const tir::CallNode *op) {
+    ICHECK_EQ(op->args.size(), 3U)
+        << GetCallExternName(op) << " expects destination and source addresses";
+    auto dst = MatchAddressOfBufferLoad(op->args[1]);
+    auto src = MatchAddressOfBufferLoad(op->args[2]);
+    ICHECK(dst.has_value() && src.has_value())
+        << GetCallExternName(op) << " expects address_of(BufferLoad) operands";
+    ValidateContiguousBuffer(dst->buffer);
+    ValidateContiguousBuffer(src->buffer);
+    auto validate_dtype = [&](DataType dtype) {
+      ICHECK(dtype.lanes() == 1 &&
+             (dtype.is_int() || dtype.is_uint() || IsFloatLikeType(dtype)) &&
+             (dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32 ||
+              dtype.bits() == 64))
+          << GetCallExternName(op)
+          << " expects byte-addressable scalar buffers";
+    };
+    validate_dtype(src->buffer->dtype);
+    validate_dtype(dst->buffer->dtype);
+
+    mlir::Value src_memref = LookupBufferValue(src->buffer);
+    mlir::Value dst_memref = LookupBufferValue(dst->buffer);
+    mlir::Value src_base = LinearizeCompactBufferIndices(
+        src->buffer, LowerScalarIndices(src->indices));
+    mlir::Value dst_base = LinearizeCompactBufferIndices(
+        dst->buffer, LowerScalarIndices(dst->indices));
+    int src_bits = src->buffer->dtype.bits();
+    int dst_bits = dst->buffer->dtype.bits();
+    // These helpers copy 16 bytes, including across differing storage types.
+    // Gather all source bits before storing, like the upstream uint4 temporary.
+    // CUDA cache-eviction hints do not change the synchronous memory semantics.
+    mlir::Type bits_type = builder_.getIntegerType(128);
+    mlir::Value bits = ConstantIntLike(0, bits_type);
+    for (int lane = 0; lane < 128 / src_bits; ++lane) {
+      auto indices = RowMajorLinearOffsetToIndices(
+          src->buffer, IndexAdd(src_base, IndexConst(lane)));
+      mlir::Value value =
+          builder_.create<mlir::memref::LoadOp>(loc_, src_memref, indices);
+      if (mlir::isa<mlir::FloatType>(value.getType())) {
+        value = builder_.create<mlir::arith::BitcastOp>(
+            loc_, builder_.getIntegerType(src_bits), value);
+      }
+      value = builder_.create<mlir::arith::ExtUIOp>(loc_, bits_type, value);
+      if (lane != 0) {
+        value = builder_.create<mlir::arith::ShLIOp>(
+            loc_, value, ConstantIntLike(lane * src_bits, bits_type));
+      }
+      bits = builder_.create<mlir::arith::OrIOp>(loc_, bits, value);
+    }
+    for (int lane = 0; lane < 128 / dst_bits; ++lane) {
+      mlir::Value value = bits;
+      if (lane != 0) {
+        value = builder_.create<mlir::arith::ShRUIOp>(
+            loc_, value, ConstantIntLike(lane * dst_bits, bits_type));
+      }
+      value = builder_.create<mlir::arith::TruncIOp>(
+          loc_, builder_.getIntegerType(dst_bits), value);
+      mlir::Type dst_type = LowerScalarType(dst->buffer->dtype);
+      if (mlir::isa<mlir::FloatType>(dst_type)) {
+        value = builder_.create<mlir::arith::BitcastOp>(loc_, dst_type, value);
+      }
+      auto indices = RowMajorLinearOffsetToIndices(
+          dst->buffer, IndexAdd(dst_base, IndexConst(lane)));
+      builder_.create<mlir::memref::StoreOp>(loc_, value, dst_memref, indices);
+    }
+  }
+
+  mlir::Value LowerStreamingScalarLoadCallExtern(const tir::CallNode *op) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << GetCallExternName(op) << " expects one source address";
+    auto src = MatchAddressOfBufferLoad(op->args[1]);
+    ICHECK(src.has_value())
+        << GetCallExternName(op) << " expects address_of(BufferLoad)";
+    DataType dtype = src->buffer->dtype;
+    ICHECK(dtype == op->dtype && dtype.lanes() == 1 &&
+           (dtype.bits() == 16 || dtype.bits() == 32))
+        << GetCallExternName(op) << " expects matching 16/32-bit scalar types";
+    ICHECK(GetCallExternName(op) != "tileops::load_f32_evict_last" ||
+           dtype == DataType::Float(32))
+        << "tileops::load_f32_evict_last expects float32";
+    ValidateLowerableBufferLayout(src->buffer);
+    return builder_.create<mlir::memref::LoadOp>(
+        loc_, LookupBufferValue(src->buffer), LowerScalarIndices(src->indices));
+  }
+
   mlir::Value LowerAtomicAddOffsetCallExtern(const tir::CallNode *op) {
     ICHECK(IsAtomicAddOffsetCallExtern(op))
         << "LowerAtomicAddOffsetCallExtern expects tl_atomic_add_offset";
@@ -10082,6 +10218,19 @@ private:
         return LowerSerializedFp8OutputStoreCallExtern(op);
       }
       if (IsSerializedNoOpCallExternName(extern_name)) {
+        return true;
+      }
+      if (IsStreamingVectorLoadCallExtern(op)) {
+        LowerStreamingVectorLoadCallExtern(op);
+        return true;
+      }
+      if (IsStreamingScalarLoadCallExtern(op)) {
+        (void)LowerStreamingScalarLoadCallExtern(op);
+        return true;
+      }
+      if (IsFastFloatDivideCallExtern(op)) {
+        (void)LowerFastFloatDivide(builder_, loc_, VisitExpr(op->args[1]),
+                                   VisitExpr(op->args[2]));
         return true;
       }
       if (IsSupportedUInt32BinaryCallExtern(op)) {
@@ -12663,6 +12812,13 @@ private:
         }
         if (IsAtomicAddOffsetCallExtern(op)) {
           return LowerAtomicAddOffsetCallExtern(op);
+        }
+        if (IsStreamingScalarLoadCallExtern(op)) {
+          return LowerStreamingScalarLoadCallExtern(op);
+        }
+        if (IsFastFloatDivideCallExtern(op)) {
+          return LowerFastFloatDivide(builder_, loc_, VisitExpr(op->args[1]),
+                                      VisitExpr(op->args[2]));
         }
         if (IsSupportedUInt32BinaryCallExtern(op)) {
           mlir::Value lhs = CastValue(VisitExpr(op->args[1]),

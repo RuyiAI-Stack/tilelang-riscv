@@ -41,6 +41,10 @@ EXPLICIT_TESTS = {
     "TopKTopPMaskFwdOp": ["test_sampling_masks.py::test_top_k_top_p_mask_ragged_runtime_compare"],
     "INT8DequantPerChannelFwdOp": ["test_int8_dequant.py::test_int8_dequant_per_channel_runtime_compare"],
     "INT8DequantPerBlockFwdOp": ["test_int8_dequant.py::test_int8_dequant_per_block_runtime_compare"],
+    "INT8DequantPerTensorFwdOp": ["test_int8_dequant.py::test_int8_dequant_per_tensor_runtime_compare"],
+    "INT8QuantPerChannelFwdOp": ["test_int8_quant.py::test_int8_row_quantizers_runtime_compare[False-"],
+    "SmoothQuantFwdOp": ["test_int8_quant.py::test_int8_row_quantizers_runtime_compare[True-"],
+    "INT8QuantPerBlockFwdOp": ["test_int8_quant.py::test_int8_block_quantizers_runtime_compare"],
     "PagedKVCacheWriteFwdOp": ["test_paged_kv_cache_write.py"],
     "PagedKVCacheGatherFwdOp": ["test_paged_cache_gather.py"],
     "DeltaNetFwdOp": ["test_delta_decode.py::test_deltanet_decode_runtime_compare"],
@@ -90,23 +94,14 @@ KNOWN_GAPS = {
         "General FP16/BF16 programs have selected RoPE/window/sink and split numerical coverage; public dispatch and WS RoPE preparation are unvalidated",
         "Upstream paged GQA still requires an external implementation for FP8",
     ],
-    "SigmoidFwdOp": [
-        "FP32 generic-load numerics are tested; aligned register-copy uses CUDA-only tileops::load16_evict_last",
-        "FP16/BF16 sigmoid uses unsupported CUDA __fdividef, including the generic-load path",
-    ],
     "MLADecodeWithKVCacheFwdOp": ["WS variant calls unsupported tileops::uniform_wgmma_bases; MMA numerics are tested"],
     "GemmW4A16FwdOp": ["WGMMA variant calls unsupported tileops::w4a16_dequant_word; original MMA FP16/BF16 numerics are tested"],
-    "FP8QuantPerBlockFwdOp": ["Unaligned FP16/BF16/FP32 numerics are tested; aligned variant requires tileops::load16 helpers"],
-    "RMSNormFwdOp": [
-        "Ragged FP32 width uses the original generic-load path; aligned/warp-row vector fast paths call tileops::load16_evict_last"
+    "RMSNormFwdOp": ["Ragged FP32 width is tested; aligned/warp-row vector fast paths still need kernel-level numerical validation"],
+    "SoftmaxFwdOp": ["Ragged 513-column FP32 row is tested; the aligned held-row fast path still needs kernel-level numerical validation"],
+    "INT8QuantPerTensorFwdOp": [
+        "Streaming-load helpers are supported; the per-tensor quantizer has no numerical coverage and multiple CTAs require grid-wide synchronization"
     ],
-    "SoftmaxFwdOp": ["Ragged 513-column FP32 row uses generic loads; aligned held-row fast path calls tileops::load16_evict_last"],
-    "INT8QuantPerTensorFwdOp": ["Whole vectors require tileops::load16 helpers; multiple CTAs also require grid-wide synchronization"],
-    "INT8QuantPerChannelFwdOp": ["Whole vectors require tileops::load16 helpers; only short scalar-tail probes have run"],
-    "INT8QuantPerBlockFwdOp": ["Whole vectors require tileops::load16_evict_first; only short scalar-tail probes have run"],
-    "INT4QuantPerGroupFwdOp": ["First blocker is uint32-to-float16x2 reinterpret; also requires CUDA-specific tileops::load16 helpers"],
-    "SmoothQuantFwdOp": ["Whole vectors require tileops::load16 helpers"],
-    "INT8DequantPerTensorFwdOp": ["Calls CUDA-specific tileops::load_f32_evict_last"],
+    "INT4QuantPerGroupFwdOp": ["uint32-to-float16x2 packed reinterpret remains unsupported; the quantizer has no numerical coverage"],
     "MoEGroupedGemmFP8FwdOp": [
         "Minimal original-kernel probe fails TIR opaque-access region inference before codegen; source also uses SM90 TMA/WGMMA and tileops::moe_fp8 helpers"
     ],

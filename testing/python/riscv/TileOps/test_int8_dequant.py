@@ -7,6 +7,26 @@ from ._harness import compile_tileops_jit, get_kernel_class
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("staged", [False, True])
+def test_int8_dequant_per_tensor_runtime_compare(dtype, staged):
+    get_kernel_class("quantization.int8_dequant", "INT8DequantPerTensorFwdKernel")
+    from tileops.kernels.quantization.int8_dequant import _int8_dequant_per_tensor_kernel
+
+    # A full tile and a ragged tail; all 256 integer codes occur in the input.
+    codes = torch.arange(-128, 129, dtype=torch.int32).clamp(-128, 127).to(torch.int8)
+    before = codes.clone()
+    scale = torch.tensor([0.03125])
+    factory = _int8_dequant_per_tensor_kernel(257, str(dtype).split(".")[-1], 16 // dtype.itemsize, staged, 2048, 4)
+    kernel = compile_tileops_jit(factory, {"threads": 32, "steps": 1})
+    try:
+        actual = kernel(codes, scale)
+        torch.testing.assert_close(actual, (codes.float() * scale).to(dtype), atol=0, rtol=0)
+        torch.testing.assert_close(codes, before, atol=0, rtol=0)
+    finally:
+        kernel.close()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("k", [5, 19])
 def test_int8_dequant_per_channel_runtime_compare(dtype, k):
     get_kernel_class("quantization.int8_dequant", "INT8DequantPerChannelFwdKernel")

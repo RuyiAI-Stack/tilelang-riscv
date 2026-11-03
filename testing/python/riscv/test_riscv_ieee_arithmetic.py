@@ -90,3 +90,80 @@ def test_ieee_directed_rounding_rejected(operation, rounding):
 
     with pytest.raises(tvm.error.InternalError, match="Unsupported.*(ieee_fdiv|ieee_fmaf|ieee_frcp)"):
         tilelang.compile(directed, target="riscv", out_idx=[2])
+
+
+@pytest.mark.parametrize("schedule", ["scalar", "structured"])
+def test_fast_division_range_and_special_values(schedule):
+    boundary = 2.0**126
+    above_boundary = torch.nextafter(torch.tensor(boundary), torch.tensor(float("inf"))).item()
+    tiny, largest = torch.finfo(torch.float32).tiny, torch.finfo(torch.float32).max
+    numerators = torch.tensor([0.0, -0.0, 1.0, -1.0, 3.25, tiny, largest, float("inf"), -float("inf"), float("nan")])
+    divisors = torch.tensor(
+        [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            3.0,
+            -3.0,
+            tiny,
+            -tiny,
+            boundary,
+            -boundary,
+            above_boundary,
+            -above_boundary,
+            largest,
+            -largest,
+            float("inf"),
+            -float("inf"),
+            float("nan"),
+        ]
+    )
+    a = numerators.repeat_interleave(divisors.numel())
+    b = divisors.repeat(numerators.numel())
+    n = a.numel()
+
+    @T.prim_func
+    def scalar(a: T.Tensor((n,), "float32"), b: T.Tensor((n,), "float32"), out: T.Tensor((n,), "float32")):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(n):
+                out[i] = T.call_extern("float32", "__fdividef", a[i], b[i])
+
+    @T.prim_func
+    def structured(a: T.Tensor((n,), "float32"), b: T.Tensor((n,), "float32"), out: T.Tensor((n,), "float32")):
+        for i in T.grid(n):
+            with T.block("divide"):
+                vi = T.axis.spatial(n, i)
+                out[vi] = T.call_extern("float32", "__fdividef", a[vi], b[vi])
+
+    expected = a / b
+    # CUDA documents zero (finite numerator) or NaN (infinite numerator)
+    # for a finite divisor strictly greater in magnitude than 2**126.
+    exceptional = torch.isfinite(b) & (b.abs() > boundary)
+    signed_zero = torch.copysign(torch.zeros_like(a), a) * torch.copysign(torch.ones_like(b), b)
+    expected[exceptional & torch.isfinite(a)] = signed_zero[exceptional & torch.isfinite(a)]
+    expected[exceptional & ~torch.isfinite(a)] = float("nan")
+
+    kernel = tilelang.compile(scalar if schedule == "scalar" else structured, target="riscv", out_idx=[2])
+    try:
+        actual = kernel(a, b)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0, equal_nan=True)
+        zeros = expected == 0
+        torch.testing.assert_close(torch.signbit(actual[zeros]), torch.signbit(expected[zeros]))
+        source = kernel.get_kernel_source()
+        assert "arith.divf" in source
+        if schedule == "structured":
+            assert "linalg.generic" in source
+    finally:
+        kernel.close()
+
+
+@pytest.mark.parametrize("dtype", ["float64", "int32"])
+def test_fast_division_invalid_signature_rejected(dtype):
+    @T.prim_func
+    def invalid(a: T.Tensor((1,), dtype), b: T.Tensor((1,), dtype), out: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=1):
+            out[0] = T.call_extern(dtype, "__fdividef", a[0], b[0])
+
+    with pytest.raises(tvm.error.InternalError, match="Unsupported call_extern.*__fdividef"):
+        tilelang.compile(invalid, target="riscv", out_idx=[2])

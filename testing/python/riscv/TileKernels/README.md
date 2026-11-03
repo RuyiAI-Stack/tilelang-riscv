@@ -18,9 +18,10 @@ fused SwiGLU, Engram, and mHC forward/backward components.
 including accumulation into existing gradient buffers. The Engram fused-routing
 case checks preservation of shared values across serialized thread phases.
 
-The October 16 x86 host run passed all 48 cases through the RISC-V adapter.
-These results do not establish SG2044 native performance; the current compiler
-changes still need native validation.
+The October 28–29 SG2044 native run passed all 48 cases through the RISC-V
+adapter, using Buddy `release/v0.1.2` and LLVM
+`3845a20590afedfbece4d000f97a6cfbbea3bf43`. These correctness results do not
+establish native performance or support for every shape, dtype or schedule.
 
 ## Run
 
