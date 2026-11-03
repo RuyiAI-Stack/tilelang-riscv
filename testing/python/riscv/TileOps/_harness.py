@@ -31,11 +31,23 @@ def _ensure_tvm_tirx_shim() -> None:
     import tvm
     import tvm.tir
 
-    sys.modules.setdefault("tvm.tirx", tvm.tir)
+    # TileOps uses a few symbols that older TVM revisions do not re-export
+    # from tir, although their implementations are present in the submodules.
+    for name in ("Var", "FloatImm", "IntImm", "Let", "Select"):
+        if not hasattr(tvm.tir, name):
+            setattr(tvm.tir, name, getattr(importlib.import_module("tvm.tir.expr"), name))
+    for name in ("all", "any"):
+        if not hasattr(tvm.tir, name):
+            setattr(tvm.tir, name, getattr(importlib.import_module("tvm.tir.op"), name))
+
+    tirx = sys.modules.setdefault("tvm.tirx", tvm.tir)
+    for name in ("Var", "FloatImm", "IntImm", "Let", "Select", "all", "any"):
+        if not hasattr(tirx, name):
+            setattr(tirx, name, getattr(tvm.tir, name))
     sys.modules.setdefault("tvm.tirx.op", importlib.import_module("tvm.tir.op"))
     sys.modules.setdefault("tvm.tirx.stmt_functor", importlib.import_module("tvm.tir.stmt_functor"))
     if not hasattr(tvm, "tirx"):
-        tvm.tirx = tvm.tir
+        tvm.tirx = tirx
 
 
 def _ensure_torch_library_custom_op_shim() -> None:

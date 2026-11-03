@@ -1,4 +1,4 @@
-"""Numerical coverage for the original unaligned FP8 block quantizer."""
+"""Numerical coverage for original aligned and ragged FP8 block quantizers."""
 
 import pytest
 import torch
@@ -10,6 +10,16 @@ from ._harness import compile_tileops_jit, get_kernel_class
 @pytest.mark.parametrize("input_kind", ["random", "zeros", "tiny"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_fp8_quant_per_block_unaligned_runtime_compare(rows, cols, input_kind, dtype):
+    _run_fp8_quant_per_block(rows, cols, input_kind, dtype, aligned=False, evict_first=False)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("evict_first", [False, True])
+def test_fp8_quant_per_block_aligned_runtime_compare(dtype, evict_first):
+    _run_fp8_quant_per_block(128, 128, "random", dtype, aligned=True, evict_first=evict_first)
+
+
+def _run_fp8_quant_per_block(rows, cols, input_kind, dtype, *, aligned, evict_first):
     get_kernel_class("quantization.fp8_quant_per_block", "FP8QuantPerBlockUnalignedFwdKernel")
     from tileops.kernels.quantization.fp8_quant_per_block import _fp8_quant_per_block_kernel
 
@@ -23,8 +33,8 @@ def test_fp8_quant_per_block_unaligned_runtime_compare(rows, cols, input_kind, d
     before = x.clone()
     codes = torch.empty(rows, cols, dtype=torch.float8_e4m3fn)
     scales = torch.empty((rows + 127) // 128, (cols + 127) // 128, dtype=torch.float32)
-    factory = _fp8_quant_per_block_kernel(rows, cols, str(dtype).split(".")[-1], False)
-    kernel = compile_tileops_jit(factory, {"threads": 128, "min_blocks": None, "evict_first": False})
+    factory = _fp8_quant_per_block_kernel(rows, cols, str(dtype).split(".")[-1], aligned)
+    kernel = compile_tileops_jit(factory, {"threads": 128, "min_blocks": None, "evict_first": evict_first})
     try:
         kernel(x.reshape(-1), codes.reshape(-1), scales.reshape(-1))
     finally:

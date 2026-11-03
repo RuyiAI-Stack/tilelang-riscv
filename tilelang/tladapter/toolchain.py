@@ -58,9 +58,9 @@ def resolve_llvm_root(*, required: bool = True) -> Path | None:
             return root
     if required:
         raise ToolchainNotFoundError(
-            "LLVM/MLIR toolchain not found. Build it with "
-            "Buddy MLIR release/v0.1.0 as described in "
-            "`docs/get_started/BuildOnSG2044.md`, or set TILELANG_RISCV_LLVM_ROOT."
+            "LLVM/MLIR toolchain not found. Build Buddy's LLVM/MLIR as described in "
+            "docs/get_started/BuildOnSG2044.md and set TILELANG_RISCV_LLVM_ROOT "
+            "to its build or install prefix."
         )
     return None
 
@@ -72,9 +72,7 @@ def _resolve_cmake_dir(package_name: str, *, required: bool) -> Path | None:
             if cmake_dir.is_dir():
                 return cmake_dir
     if required:
-        raise ToolchainNotFoundError(
-            f"{package_name} CMake package directory not found under the configured LLVM root."
-        )
+        raise ToolchainNotFoundError(f"{package_name} CMake package directory not found under the configured LLVM root.")
     return None
 
 
@@ -103,9 +101,7 @@ def resolve_tool(tool_name: str, *, required: bool = True) -> Path | None:
         return Path(path_hit).resolve()
 
     if required:
-        raise ToolchainNotFoundError(
-            f"Tool `{tool_name}` not found. Build the LLVM/MLIR toolchain or add it to PATH."
-        )
+        raise ToolchainNotFoundError(f"Tool `{tool_name}` not found. Build the LLVM/MLIR toolchain or add it to PATH.")
     return None
 
 
@@ -119,8 +115,9 @@ def resolve_mlir_python_root(*, required: bool = True) -> Path | None:
 
     if required:
         raise ToolchainNotFoundError(
-            "MLIR Python bindings not found. Build Buddy MLIR release/v0.1.0 as described in "
-            "`docs/get_started/BuildOnSG2044.md`, with MLIR Python bindings enabled."
+            "MLIR Python bindings not found. Build Buddy's LLVM/MLIR with "
+            "MLIR_ENABLE_BINDINGS_PYTHON=ON as described in "
+            "docs/get_started/BuildOnSG2044.md and set TILELANG_RISCV_LLVM_ROOT."
         )
     return None
 

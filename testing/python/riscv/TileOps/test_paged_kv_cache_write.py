@@ -69,8 +69,14 @@ def test_paged_kv_cache_write_runtime_compare(dtype, cache_dtype, heads, dim, co
     """Reuse one program across token counts, overwrite rows, skip slots, and empty input."""
     pages, page_size = 3, 7
     torch.manual_seed(210)
-    k_pages = torch.full((pages, page_size, heads, dim), 0.25, dtype=cache_dtype)
-    v_pages = torch.full_like(k_pages, -0.5)
+    k_pages = torch.empty((pages, page_size, heads, dim), dtype=cache_dtype)
+    v_pages = torch.empty_like(k_pages)
+    if cache_dtype == torch.float8_e4m3fn:
+        k_pages.view(torch.uint8).fill_(0x28)
+        v_pages.view(torch.uint8).fill_(0xB0)
+    else:
+        k_pages.fill_(0.25)
+        v_pages.fill_(-0.5)
     pointers = (k_pages.data_ptr(), v_pages.data_ptr())
     writer, compiled, launches = compile_cache_writer(heads, dim, pages, page_size, dtype, cache_dtype, config)
     try:
@@ -123,8 +129,10 @@ def test_paged_kv_cache_write_fp8_special_values(dtype):
     k = values.reshape(1, 1, 16).repeat(3, 1, 1)
     v = -k
     slots = torch.tensor([3, -1, 0], dtype=torch.int64)
-    k_pages = torch.full((2, 2, 1, 16), 0.25, dtype=torch.float8_e4m3fn)
-    v_pages = torch.full_like(k_pages, -0.5)
+    k_pages = torch.empty((2, 2, 1, 16), dtype=torch.float8_e4m3fn)
+    v_pages = torch.empty_like(k_pages)
+    k_pages.view(torch.uint8).fill_(0x28)
+    v_pages.view(torch.uint8).fill_(0xB0)
     ks, vs = torch.ones(1), torch.ones(1)
     before = [t.clone() for t in (k, v, slots, ks, vs)]
     expected = cache_write_reference(k, v, k_pages, v_pages, slots, ks, vs)

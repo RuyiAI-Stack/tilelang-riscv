@@ -81,15 +81,21 @@ native RVV execution on SG2044.
 The pinned release and local build steps are documented in the
 [SG2044 build guide](../../../docs/get_started/BuildOnSG2044.md).
 
-The October 16 x86 host runs at TileOps `67250e81` passed 415 TileOps checks
-(400 kernel/component numerical, 12 scoped public-API numerical and three
-rejection checks) and 48 TileKernels numerical checks. There are no compile-only
-cases in either operator-library suite. Current sources have not been rerun on
-SG2044; host execution does not establish native RISC-V correctness or performance.
+The October 28–29 SG2044 native run at TileOps `67250e81` passed 451 TileOps
+checks (436 kernel/component numerical, 12 scoped public-API numerical and three
+rejection checks) and 48 TileKernels numerical checks. The 499 checks include
+496 numerical executions and three rejection checks, with no compile-only cases,
+skips or expected failures. The toolchain was Buddy `release/v0.1.2` with LLVM
+`3845a20590afedfbece4d000f97a6cfbbea3bf43`. These results cover the declared
+test configurations; they do not certify every operator contract or performance.
 
 The related compiler regressions cover thread-local state across serialized
 phases, safe memory tails, IEEE arithmetic, bit operations, FP8/FP4 conversion,
-dynamic while loops, affine buffer extents and shared-memory allocation policy.
+dynamic while loops, affine buffer extents, shared-memory allocation policy,
+streaming-load bit preservation and the FP32 `__fdividef` signature and exceptional
+values. The operator inventory has 180 TileOps kernel-test references, nine
+component-test references and 16 unmapped declarations; all 48 TileKernels
+factories have references. References alone are not numerical acceptance.
 To run the tracked backend and operator tests with fresh compilation, then check
 cache reload separately:
 

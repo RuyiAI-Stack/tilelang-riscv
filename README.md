@@ -156,14 +156,17 @@ TILELANG_DISABLE_CACHE=1 python -m pytest -q testing/python/riscv/TileOps
 
 Both suites compile original upstream programs with `target="riscv"` and compare
 selected executions against independent CPU/PyTorch references. TileOps is pinned
-to `67250e81`; its suite has 415 passing checks (412 numerical cases and three
+to `67250e81`; its suite has 451 passing checks (448 numerical cases and three
 unsupported-feature rejection checks). TileKernels is pinned to `36d9e45d`, with
 48 numerical checks and references to all 48 top-level JIT factories, including
 nine mHC backward factories. Test counts do not certify all operator variants.
 
-These October 16 results were obtained on an x86 host through the RISC-V MLIR
-adapter. The current TileOps pin and compiler changes still need SG2044 native
-validation. See the [TileOps coverage and limitations](./testing/python/riscv/TileOps/README.md),
+These October 28–29 results were obtained natively on SG2044 through the RISC-V
+MLIR adapter, using Buddy `release/v0.1.2` with the same LLVM revision as the
+separate Buddy `release/v0.1.0` compiler CI. Selected paths now include aligned
+FP8 quantization, INT8 row/block quantization, SmoothQuant, per-tensor INT8
+dequantization and FP16/BF16 sigmoid. Public backend registration remains scoped
+to tests. See the [TileOps coverage and limitations](./testing/python/riscv/TileOps/README.md),
 [TileKernels tests](./testing/python/riscv/TileKernels/README.md) and
 [RISC-V test suite](./testing/python/riscv/README.md) for reproduction instructions.
 

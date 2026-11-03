@@ -56,12 +56,12 @@ function(tilelang_configure_riscv_mlir)
     if(_tilelang_riscv_mlir_mode STREQUAL "ON")
       message(FATAL_ERROR
         "TILELANG_RISCV_MLIR_MODE=ON but no LLVM/MLIR install was found. "
-        "Build Buddy MLIR release/v0.1.0 as described in "
-        "docs/get_started/BuildOnSG2044.md or set TILELANG_RISCV_LLVM_ROOT.")
+        "Build Buddy's LLVM/MLIR as described in docs/get_started/BuildOnSG2044.md "
+        "and set TILELANG_RISCV_LLVM_ROOT to its build or install prefix.")
     endif()
     message(STATUS
       "LLVM/MLIR toolchain for RISC-V not found; keeping placeholder backend build. "
-      "Set TILELANG_RISCV_LLVM_ROOT to a Buddy MLIR v0.1.0 LLVM/MLIR install "
+      "Set TILELANG_RISCV_LLVM_ROOT to a Buddy LLVM/MLIR build or install "
       "as described in docs/get_started/BuildOnSG2044.md to enable it.")
     set(TILELANG_RISCV_MLIR_FOUND FALSE PARENT_SCOPE)
     set(TILELANG_RISCV_MLIR_ENABLED FALSE PARENT_SCOPE)
@@ -71,7 +71,7 @@ function(tilelang_configure_riscv_mlir)
     return()
   endif()
 
-  # Buddy MLIR release/v0.1.0 is based on LLVM/MLIR 24.0.0git. Require the
+  # The supported Buddy releases use LLVM/MLIR 24.0.0git. Require the
   # supported major/minor version so an older, API-incompatible checkout fails
   # during configuration instead of later in a C++ compile or at runtime.
   find_package(LLVM 24.0 REQUIRED CONFIG PATHS "${_llvm_dir}" NO_DEFAULT_PATH)

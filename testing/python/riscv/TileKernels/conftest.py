@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -18,15 +19,25 @@ for path in (REPO_ROOT, TILEKERNELS_ROOT):
 
 
 def _maybe_set_llvm_root() -> Path | None:
+    buddy_llvm = REPO_ROOT.parent / "buddy-mlir" / "llvm"
+    vendored_llvm = REPO_ROOT / "3rdparty" / "llvm-project"
     candidates = [
         os.environ.get("TILELANG_RISCV_LLVM_ROOT"),
-        "/root/llvm/build",
-        "/home/liquanyi/tool/llvm",
+        os.environ.get("TILELANG_LLVM_INSTALL_DIR"),
+        buddy_llvm / "build",
+        buddy_llvm / "install",
+        vendored_llvm / "install",
+        vendored_llvm / "build-host" / "install",
+        vendored_llvm / "build" / "install",
     ]
+    path_tool = shutil.which("mlir-translate")
+    if path_tool:
+        candidates.append(Path(path_tool).resolve().parent.parent)
+
     for candidate in candidates:
         if not candidate:
             continue
-        root = Path(candidate)
+        root = Path(candidate).expanduser()
         if (root / "bin" / "mlir-translate").is_file():
             os.environ.setdefault("TILELANG_RISCV_LLVM_ROOT", str(root))
             os.environ.setdefault("TILELANG_RISCV_MLIR_MODE", "ON")
