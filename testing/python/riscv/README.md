@@ -19,6 +19,22 @@ This directory contains TileLang RISC-V backend tests.
 
 ## Run
 
+Run from the repository root with a TileLang build configured using
+`-DTILELANG_RISCV_MLIR_MODE=ON`. Replace the toolchain paths below with your
+installations:
+
+```bash
+export TILELANG_RISCV_LLVM_ROOT=/path/to/llvm
+export TILELANG_RISCV_BUDDY_ROOT=/path/to/buddy-mlir
+export PATH="$TILELANG_RISCV_BUDDY_ROOT/bin:$TILELANG_RISCV_LLVM_ROOT/bin:$PATH"
+export LD_LIBRARY_PATH="$TILELANG_RISCV_LLVM_ROOT/lib:$TILELANG_RISCV_BUDDY_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export TVM_FFI_DISABLE_TORCH_C_DLPACK=1
+```
+
+The optimizer defaults to `buddy-opt`. Set `TILELANG_RISCV_OPT=mlir-opt` to use
+the LLVM optimizer. See the [SG2044 build guide](../../../docs/get_started/BuildOnSG2044.md)
+for installation and native GCC configuration.
+
 Core backend tests:
 
 ```bash
@@ -76,10 +92,11 @@ LLVM/MLIR and GCC library paths; see the
 The dedicated [Buddy MLIR CI workflow](../../../.github/workflows/ci-buddy-mlir.yml)
 uses the official LLVM/MLIR 24.0 toolchain asset from Buddy MLIR
 `release/v0.1.0`, builds TileLang against it, and runs the core lowering and
-codegen suites on an x86_64 runner. It validates compiler integration, not
-native RVV execution on SG2044.
-The pinned release and local build steps are documented in the
-[SG2044 build guide](../../../docs/get_started/BuildOnSG2044.md).
+codegen suites on an x86_64 runner. It explicitly selects
+`TILELANG_RISCV_OPT=mlir-opt` and validates compiler integration, not native RVV
+execution on SG2044.
+See the [SG2044 build guide](../../../docs/get_started/BuildOnSG2044.md)
+for toolchain setup and installation.
 
 The October 28–29 SG2044 native run at TileOps `67250e81` passed 451 TileOps
 checks (436 kernel/component numerical, 12 scoped public-API numerical and three
@@ -110,5 +127,6 @@ TILELANG_DISABLE_CACHE=1 python -m pytest -q \
 TILELANG_DISABLE_CACHE=0 python -m pytest -q testing/python/riscv/test_riscv_cache.py
 ```
 
-Set `TILELANG_RISCV_LLVM_ROOT` to the LLVM/MLIR toolchain and
-`TILELANG_RISCV_MLIR_MODE=ON` for these runs.
+For manual example usage, see [GEMM](../../../examples/riscv/gemm/README.md)
+and [BOSC GEMM](../../../examples/riscv/bosc/README.md). FPGA execution is a
+separate validation step from the host and codegen tests above.

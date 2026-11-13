@@ -2,6 +2,14 @@
 
 The documentation was built upon [Sphinx](https://www.sphinx-doc.org/en/master/).
 
+## RISC-V Guides
+
+- [Build and run on SG2044](get_started/BuildOnSG2044.md)
+- [Target selection](get_started/targets.md)
+- [GEMM example](../examples/riscv/gemm/README.md)
+- [BOSC GEMM example](../examples/riscv/bosc/README.md)
+- [RISC-V tests](../testing/python/riscv/README.md)
+
 ## Dependencies
 
 Run the following command in this directory to install dependencies first:

@@ -4,13 +4,13 @@ TileLang compiler backend for RISC-V platforms.
 
 This repository extends [TileLang](https://github.com/tile-ai/tilelang) with a
 structured MLIR-backed RISC-V target. It is intended for native execution on
-RISC-V systems such as SG2044 and for developing portable TileLang kernels
-against the LLVM/MLIR toolchain.
+RISC-V systems such as SG2044, host-side kernel development, and BOSC AME
+FPGA firmware generation through Buddy MLIR.
 
 The RISC-V path does not require a CUDA or AMD GPU toolchain. It uses MLIR for
 structured lowering and a native RISC-V C/C++ toolchain for host execution.
 
-**Compilation pipeline:**
+**Native host compilation pipeline:**
 
 ```text
 TileLang Python DSL
@@ -29,6 +29,7 @@ The main focus of this repository is:
 - a `target="riscv"` backend for TileLang
 - TIR to structured MLIR lowering
 - native RISC-V host-library generation and execution
+- BOSC AME INT8 GEMM firmware generation
 - compatibility with TileLang operator implementations, TileOps and TileKernels
 - correctness validation on real RISC-V hardware
 
@@ -50,61 +51,10 @@ If the repository was cloned without submodules:
 git submodule update --init --recursive
 ```
 
-## Prerequisites
+## Build and Install
 
-The native RISC-V workflow requires:
-
-- Python 3.9 or newer
-- CMake 3.26 or newer
-- Buddy MLIR `release/v0.1.0` and its LLVM/MLIR 24.0 toolchain (see the
-  [SG2044 build guide](./docs/get_started/BuildOnSG2044.md))
-- a native RISC-V GCC toolchain and sysroot
-- a RISC-V machine for native execution, such as SG2044
-
-The compiler can be built on another host for inspection or artifact
-generation, but RVV runtime validation must be performed on a RISC-V machine.
-
-## Environment
-
-Set the toolchain variables for a native RISC-V build. The paths below are
-examples and should be adapted to the local installation:
-
-```sh
-export TILELANG_RISCV_LLVM_ROOT=/path/to/llvm-mlir
-export CC=/path/to/riscv64-gcc
-export CXX=/path/to/riscv64-g++
-export TVM_FFI_DISABLE_TORCH_C_DLPACK=1
-export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=OFF -DTILELANG_RISCV_MLIR_MODE=ON"
-```
-
-`TILELANG_RISCV_MLIR_MODE` controls the optional LLVM/MLIR integration:
-
-- `ON` requires LLVM/MLIR and fails during configuration if it is missing
-- `AUTO` enables it when a compatible installation is found
-- `OFF` disables the RISC-V MLIR backend
-
-For the complete SG2044 environment and toolchain setup, see
-[Build and Run on SG2044](./docs/get_started/BuildOnSG2044.md).
-
-## Install and Build
-
-Install the vendored TVM FFI package first, then install TileLang in editable
-mode:
-
-```sh
-python -m venv .venv
-source .venv/bin/activate
-
-pip install scikit-build-core cython patchelf setuptools_scm cloudpickle pytest
-pip install ./3rdparty/tvm/3rdparty/tvm-ffi --no-build-isolation --no-deps
-pip install -e . --no-build-isolation -v
-```
-
-After changing C++ or Python sources, rebuild the editable installation:
-
-```sh
-pip install -e . --no-build-isolation -v
-```
+Follow [Build and Run on SG2044](./docs/get_started/BuildOnSG2044.md) for toolchain
+requirements, environment configuration and installation.
 
 ## Verify the Build
 
@@ -124,6 +74,18 @@ kernel = tilelang.compile(tir_func, target="riscv")
 For target syntax and backend limitations, see
 [Understanding Targets](./docs/get_started/targets.md).
 
+## Examples
+
+Run the examples from the repository root after configuring the toolchain:
+
+| Example | Usage | Output |
+| --- | --- | --- |
+| [GEMM](./examples/riscv/gemm/README.md) | Compile and execute FP16 GEMM on the current host | Printed result |
+| [BOSC GEMM](./examples/riscv/bosc/README.md) | Build INT8 GEMM firmware with Buddy AME tools and an NR runtime supporting UART v1 | FPGA ELF/bin |
+
+`target="riscv"` selects the MLIR backend. The host adapter uses the current
+host's compiler target; the BOSC example uses a separate firmware build.
+
 ## Run Tests
 
 Run the core RISC-V backend tests:
@@ -135,6 +97,7 @@ python -m pytest -q testing/python/riscv/test_riscv_*.py
 Pull requests that change the RISC-V backend also run the
 [Buddy MLIR CI workflow](./.github/workflows/ci-buddy-mlir.yml), which builds
 against the pinned LLVM/MLIR 24.0 toolchain from Buddy MLIR `release/v0.1.0`.
+That compiler-only job explicitly selects `TILELANG_RISCV_OPT=mlir-opt`.
 
 Run the synthetic MLIR/code-generation tests:
 
@@ -192,6 +155,8 @@ When adding support for a new TileLang operator, prefer this workflow:
 - [Understanding Targets](./docs/get_started/targets.md)
 - [Build and Run on SG2044](./docs/get_started/BuildOnSG2044.md)
 - [RISC-V test suite layout](./testing/python/riscv/README.md)
+- [GEMM example](./examples/riscv/gemm/README.md)
+- [BOSC GEMM example](./examples/riscv/bosc/README.md)
 
 ## Contributing
 
