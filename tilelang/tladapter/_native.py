@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 
-from .toolchain import resolve_tool
+from .toolchain import resolve_optimizer
 
 
 class PassPipeline:
@@ -29,8 +29,9 @@ class PassPipeline:
         if not self._passes:
             return mlir_str
 
+        optimizer = resolve_optimizer()
         cmd = [
-            str(resolve_tool("mlir-opt")),
+            str(optimizer),
             f"--pass-pipeline={self._pipeline_text()}",
         ]
         if self._enable_ir_printing:
@@ -44,8 +45,8 @@ class PassPipeline:
             check=False,
         )
         if proc.returncode != 0:
-            message = proc.stderr.strip() or proc.stdout.strip() or "unknown mlir-opt failure"
-            raise RuntimeError(f"mlir-opt failed: {message}")
+            message = proc.stderr.strip() or proc.stdout.strip() or "unknown optimizer failure"
+            raise RuntimeError(f"{optimizer} failed: {message}")
         return proc.stdout
 
     def __str__(self) -> str:

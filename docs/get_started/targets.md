@@ -33,49 +33,28 @@ def compiled_kernel(*args):
     return func(*args)
 ```
 
-The same convention works for HIP, LLVM, or the RISC-V MLIR backend (e.g. `hip -mcpu=gfx940`,
-`llvm -mtriple=x86_64-linux-gnu`, `riscv -mtriple=riscv64-unknown-linux-gnu`).
+The same convention works for HIP and LLVM (e.g. `hip -mcpu=gfx940` or
+`llvm -mtriple=x86_64-linux-gnu`).
 
 ## RISC-V structured backend
 
-TileLang also exposes a structured MLIR-backed backend for RISC-V bring-up:
+Select the RISC-V backend with `target="riscv"`:
 
 ```python
 kernel = tilelang.compile(func, target="riscv")
 ```
 
-This path is intentionally different from the CUDA/HIP/Metal backends:
+The host adapter compiles and loads a library for the current host. Native
+RISC-V execution requires a RISC-V host and a compatible compiler toolchain.
+The [GEMM example](../../examples/riscv/gemm/README.md) uses this adapter;
+[BOSC GEMM](../../examples/riscv/bosc/README.md) builds AME firmware through
+its standalone build script.
 
-- TileLang lowers TIR into a structured MLIR module.
-- The Python runtime adapter then lowers through `mlir-opt`/`mlir-translate`/`llc`.
-- Native execution can target a real RISC-V machine by setting up an LLVM/MLIR toolchain and a native RISC-V C/C++ toolchain.
+For toolchain setup, optimizer selection and build instructions, see
+[Build and Run on SG2044](BuildOnSG2044.md). The optimizer defaults to
+`buddy-opt`; set `TILELANG_RISCV_OPT=mlir-opt` to select the LLVM optimizer.
 
-The intended shared path here is `TileLang -> MLIR Linalg -> MLIR vector/RVV lowering`. This document does not assume
-shared Triton frontend lowering passes; the commonality starts at the Linalg/downstream MLIR pipeline.
-
-For SG2044-style native bring-up, the practical environment variables are:
-
-```bash
-export TILELANG_RISCV_LLVM_ROOT=/path/to/buddy-llvm-build
-export Z3_ROOT=/path/to/z3-install-prefix
-export CC=/path/to/gcc
-export CXX=/path/to/g++
-```
-
-On mixed developer hosts you can still use `target="riscv"` for compilation artifact export without executing on the
-local machine.
-
-### Scope and limitations
-
-The validated path today is a maintainable native bring-up path, not a claim that every TileLang program is already
-supported on RISC-V.
-
-- the verified flow is `TileLang -> MLIR Linalg -> MLIR lowering -> native host adapter -> SG2044 execution`
-- x86 is sufficient for source review and compiler-path review, but not for RVV execution validation
-- first-time optional Torch DLPack extension builds can be avoided with `TVM_FFI_DISABLE_TORCH_C_DLPACK=1`
-- use `target="riscv"` as the only supported target spelling for this backend
-
-### Advanced: Specify Exact Hardware
+## Advanced: Specify Exact Hardware
 
 When you already know the precise GPU model, you can encode it in the target string—either via `-arch=sm_XX` or by
 using one of TVM’s pre-defined target tags such as `nvidia/nvidia-h100`.  Supplying this detail is optional for
@@ -160,5 +139,3 @@ This helper mirrors the table above and is safe to call at runtime (for example 
   running on. Try dropping the flag or switching to the correct compute capability.
 - When targeting multiple environments, use `auto` for convenience and override with an explicit string only when
   you need architecture-specific tuning.
-- If `target="riscv"` fails during configuration with a Z3 lookup error, set `Z3_ROOT` to a local Z3 install prefix;
-  the `z3-solver` Python wheel is not available on every architecture.

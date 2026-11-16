@@ -35,6 +35,15 @@ def _candidate_roots() -> list[Path]:
     return roots
 
 
+def _candidate_buddy_roots() -> list[Path]:
+    roots: list[Path] = []
+    env_value = os.environ.get("TILELANG_RISCV_BUDDY_ROOT")
+    if env_value:
+        roots.append(Path(env_value).expanduser())
+    roots.extend([_BUDDY_MLIR_ROOT, _BUDDY_MLIR_ROOT / "build", _BUDDY_MLIR_ROOT / "install"])
+    return roots
+
+
 def _existing_dirs(paths: list[Path]) -> list[Path]:
     result: list[Path] = []
     for path in paths:
@@ -48,6 +57,26 @@ def iter_llvm_roots() -> list[Path]:
     """Return known LLVM/MLIR install roots in priority order."""
 
     return _existing_dirs(_candidate_roots())
+
+
+def iter_buddy_roots() -> list[Path]:
+    """Return known buddy-mlir install and build roots in priority order."""
+
+    return _existing_dirs(_candidate_buddy_roots())
+
+
+def resolve_buddy_root(*, required: bool = True) -> Path | None:
+    """Resolve the buddy-mlir toolchain root, separate from the LLVM root."""
+
+    for root in iter_buddy_roots():
+        if (root / "bin").is_dir():
+            return root
+    if required:
+        raise ToolchainNotFoundError(
+            "buddy-mlir toolchain not found. Set TILELANG_RISCV_BUDDY_ROOT "
+            "to the extracted buddy-mlir directory or its build/install prefix."
+        )
+    return None
 
 
 def resolve_llvm_root(*, required: bool = True) -> Path | None:
@@ -89,9 +118,10 @@ def resolve_llvm_dir(*, required: bool = True) -> Path | None:
 
 
 def resolve_tool(tool_name: str, *, required: bool = True) -> Path | None:
-    """Resolve a tool from the configured LLVM/MLIR toolchain or PATH."""
+    """Resolve Buddy tools from buddy-mlir roots, LLVM tools from LLVM roots, then PATH."""
 
-    for root in iter_llvm_roots():
+    roots = iter_buddy_roots() if tool_name.startswith("buddy-") else iter_llvm_roots()
+    for root in roots:
         candidate = root / "bin" / tool_name
         if candidate.is_file():
             return candidate
@@ -101,7 +131,29 @@ def resolve_tool(tool_name: str, *, required: bool = True) -> Path | None:
         return Path(path_hit).resolve()
 
     if required:
-        raise ToolchainNotFoundError(f"Tool `{tool_name}` not found. Build the LLVM/MLIR toolchain or add it to PATH.")
+        root_variable = "TILELANG_RISCV_BUDDY_ROOT" if tool_name.startswith("buddy-") else "TILELANG_RISCV_LLVM_ROOT"
+        raise ToolchainNotFoundError(f"Tool `{tool_name}` not found. Set {root_variable} or add the tool to PATH.")
+    return None
+
+
+def resolve_optimizer(*, required: bool = True) -> Path | None:
+    """Select buddy-opt by default, or the tool named by TILELANG_RISCV_OPT."""
+
+    selection = os.environ.get("TILELANG_RISCV_OPT") or "buddy-opt"
+    tool_name = os.path.expanduser(selection)
+    if os.path.dirname(tool_name):
+        tool_path = shutil.which(tool_name)
+    else:
+        tool_path = resolve_tool(tool_name, required=False)
+    if tool_path is not None and os.access(tool_path, os.X_OK):
+        return Path(tool_path).resolve()
+
+    if required:
+        raise ToolchainNotFoundError(
+            f"Optimizer {selection!r} selected by TILELANG_RISCV_OPT is not executable or was not found. "
+            "Set TILELANG_RISCV_BUDDY_ROOT for buddy-opt, TILELANG_RISCV_LLVM_ROOT for mlir-opt, "
+            "or add the selected tool to PATH. Set TILELANG_RISCV_OPT=mlir-opt to use the LLVM optimizer."
+        )
     return None
 
 
@@ -126,6 +178,9 @@ def toolchain_summary() -> dict[str, str]:
     """Return a small summary of the discovered toolchain paths."""
 
     summary: dict[str, str] = {}
+    buddy_root = resolve_buddy_root(required=False)
+    if buddy_root is not None:
+        summary["buddy_root"] = str(buddy_root)
     llvm_root = resolve_llvm_root(required=False)
     if llvm_root is not None:
         summary["llvm_root"] = str(llvm_root)
@@ -138,7 +193,10 @@ def toolchain_summary() -> dict[str, str]:
     mlir_python_root = resolve_mlir_python_root(required=False)
     if mlir_python_root is not None:
         summary["mlir_python_root"] = str(mlir_python_root)
-    for tool in ("mlir-opt", "mlir-translate", "llc", "clang", "ld.lld"):
+    optimizer = resolve_optimizer(required=False)
+    if optimizer is not None:
+        summary["optimizer"] = str(optimizer)
+    for tool in ("buddy-opt", "buddy-translate", "mlir-opt", "mlir-translate", "llc", "clang", "ld.lld"):
         tool_path = resolve_tool(tool, required=False)
         if tool_path is not None:
             summary[tool.replace("-", "_")] = str(tool_path)

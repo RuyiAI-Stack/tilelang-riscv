@@ -243,6 +243,10 @@ class KernelCache:
             "compile_flags": compile_flags,
             **self._get_base_key(),
         }
+        if str(target).split(maxsplit=1)[0] == "riscv":
+            from tilelang.tladapter.toolchain import resolve_optimizer
+
+            key_data["riscv_optimizer"] = str(resolve_optimizer())
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key

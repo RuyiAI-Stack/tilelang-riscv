@@ -75,3 +75,32 @@ def test_riscv_disk_cache_reloads_without_recompile(clean_riscv_cache_env, monke
 
     assert "func.func" in kernel2.get_kernel_source()
     torch.testing.assert_close(out2, data)
+
+
+@pytest.mark.parametrize("target", ["riscv", "llvm"])
+def test_cache_key_tracks_optimizer_only_for_riscv(monkeypatch, tmp_path, target):
+    llvm_root = tmp_path / "llvm"
+    buddy_root = tmp_path / "buddy-mlir"
+    for root, name in ((llvm_root, "mlir-opt"), (buddy_root, "buddy-opt")):
+        (root / "bin").mkdir(parents=True)
+        executable = root / "bin" / name
+        executable.write_text("#!/usr/bin/env bash\n")
+        executable.chmod(0o755)
+    monkeypatch.setenv("TILELANG_RISCV_LLVM_ROOT", str(llvm_root))
+    monkeypatch.setenv("TILELANG_RISCV_BUDDY_ROOT", str(buddy_root))
+    monkeypatch.delenv("TILELANG_RISCV_OPT", raising=False)
+
+    @T.prim_func
+    def tile_copy(A: T.Tensor((N,), "float32"), B: T.Tensor((N,), "float32")):
+        with T.Kernel(1, threads=1):
+            T.copy(A, B)
+
+    cache = _dispatch_map["tvm_ffi"]
+    kwargs = dict(func=tile_copy, out_idx=[1], args=(), target=tilelang.tvm.target.Target(target))
+    default_key = cache._generate_key(**kwargs)
+    monkeypatch.setenv("TILELANG_RISCV_OPT", "mlir-opt")
+    mlir_key = cache._generate_key(**kwargs)
+
+    assert (default_key != mlir_key) == (target == "riscv")
+    monkeypatch.delenv("TILELANG_RISCV_OPT")
+    assert cache._generate_key(**kwargs) == default_key

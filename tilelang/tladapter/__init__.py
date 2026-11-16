@@ -7,10 +7,12 @@ except ImportError:
 
 from .toolchain import (
     ToolchainNotFoundError,
+    resolve_buddy_root,
     resolve_llvm_dir,
     resolve_llvm_root,
     resolve_mlir_dir,
     resolve_mlir_python_root,
+    resolve_optimizer,
     resolve_tool,
     toolchain_summary,
 )
@@ -21,10 +23,12 @@ __all__ = [
     "ToolchainNotFoundError",
     "_native",
     "pass_fn",
+    "resolve_buddy_root",
     "resolve_llvm_dir",
     "resolve_llvm_root",
     "resolve_mlir_dir",
     "resolve_mlir_python_root",
+    "resolve_optimizer",
     "resolve_tool",
     "toolchain_summary",
 ]
