@@ -37,6 +37,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/pattern.h>
 #include <tvm/ir/attrs.h>
+#include <tvm/ir/transform.h>
 #include <tvm/node/structural_equal.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/tir/analysis.h>
@@ -51,6 +52,9 @@ namespace tvm {
 namespace codegen {
 
 namespace {
+
+constexpr const char *kStructuredPrivateWrites = "tl.riscv_structured_private_writes";
+TVM_REGISTER_PASS_CONFIG_OPTION(kStructuredPrivateWrites, Bool);
 
 using FunctionEntry = std::pair<std::string, tir::PrimFunc>;
 
@@ -1191,6 +1195,10 @@ public:
       LowerFunction(name, func);
     }
 
+    if (structured_private_writes_) {
+      LowerPrivatePointStores();
+    }
+
     std::string mlir_text;
     llvm::raw_string_ostream os(mlir_text);
     module_.print(os);
@@ -1201,6 +1209,37 @@ public:
 private:
   using tir::ExprFunctor<mlir::Value(const PrimExpr &)>::VisitExpr;
   using tir::StmtFunctor<void(const tir::Stmt &)>::VisitStmt;
+
+  // Keep the exact addressed subview so a partial write inherits the rest of
+  // its allocation. Buddy's contract verifier still checks initialization.
+  void LowerPrivatePointStores() {
+    module_.walk([&](mlir::memref::StoreOp store) {
+      mlir::Value target = store.getMemRef();
+      auto type = mlir::cast<mlir::MemRefType>(target.getType());
+      if (type.getRank() == 0 || !type.getElementType().isIntOrFloat() ||
+          store.getNontemporal() || store.getAlignment() ||
+          !store->getDiscardableAttrs().empty())
+        return;
+      mlir::Value root = target;
+      while (auto view = root.getDefiningOp<mlir::ViewLikeOpInterface>())
+        root = view.getViewSource();
+      if (!root.getDefiningOp<mlir::memref::AllocaOp>() &&
+          !root.getDefiningOp<mlir::memref::AllocOp>())
+        return;
+
+      mlir::OpBuilder b(store);
+      llvm::SmallVector<mlir::OpFoldResult> offsets(store.getIndices().begin(),
+                                                    store.getIndices().end());
+      llvm::SmallVector<mlir::OpFoldResult> ones(type.getRank(),
+                                                 b.getIndexAttr(1));
+      auto point = b.create<mlir::memref::SubViewOp>(store.getLoc(), target,
+                                                     offsets, ones, ones);
+      b.create<mlir::linalg::FillOp>(store.getLoc(),
+                                     mlir::ValueRange{store.getValue()},
+                                     mlir::ValueRange{point.getResult()});
+      store.erase();
+    });
+  }
 
   struct SavedBinding {
     bool had_value{false};
@@ -8664,6 +8703,23 @@ private:
     const tir::Buffer &dst_buffer = dst_region->buffer;
     mlir::Value dst_memref = LookupBufferValue(dst_buffer);
 
+    if (structured_private_writes_ &&
+        mlir::cast<mlir::MemRefType>(dst_memref.getType())
+            .getElementType()
+            .isIntOrFloat() &&
+        dst_region->region.size() == dst_buffer->shape.size() &&
+        RegionSubviewFitsStaticShape(dst_region) &&
+        llvm::all_of(dst_region->region, [&](const Range &range) {
+          return analyzer_.CanProve(range->extent >= 0);
+        })) {
+      mlir::Value region = CreateSubview(dst_region);
+      mlir::Value value =
+          CastValue(fill_value, source_dtype, dst_buffer->dtype);
+      builder_.create<mlir::linalg::FillOp>(loc_, mlir::ValueRange{value},
+                                            mlir::ValueRange{region});
+      return;
+    }
+
     EmitLoopNest(dst_region->region, [&](llvm::ArrayRef<mlir::Value> coords) {
       llvm::SmallVector<mlir::Value, 4> dst_indices =
           LowerRegionIndices(dst_region, coords);
@@ -12983,6 +13039,10 @@ private:
 
   mlir::DialectRegistry registry_;
   arith::Analyzer analyzer_;
+  const bool structured_private_writes_ =
+      transform::PassContext::Current()
+          ->GetConfig<Bool>(kStructuredPrivateWrites, Bool(false))
+          .value();
   mlir::MLIRContext context_;
   mlir::OpBuilder builder_;
   mlir::Location loc_;

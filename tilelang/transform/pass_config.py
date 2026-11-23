@@ -49,6 +49,9 @@ class PassConfigKey(str, Enum):
     TL_SIMPLIFY_ENABLE_LET_INLINE = "enable_simplify_let_inline"
     """Enable inlining of let statements during simplification. Default: True"""
 
+    TL_RISCV_STRUCTURED_PRIVATE_WRITES = "tl.riscv_structured_private_writes"
+    """Emit private point writes and tile fills as exact Linalg regions for Buddy."""
+
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
     """Disable data race check in TileLang. Default: False"""
 

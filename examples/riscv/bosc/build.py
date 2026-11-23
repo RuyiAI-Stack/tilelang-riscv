@@ -66,7 +66,7 @@ def build(work, output, buddy, llvm_bin, buddy_bin):
     from kernel import K, M, N, bosc_gemm
 
     print("Exporting and lowering INT8 GEMM...", flush=True)
-    with tvm.transform.PassContext(opt_level=3):
+    with tvm.transform.PassContext(opt_level=3, config={"tl.riscv_structured_private_writes": True}):
         artifact = tilelang.lower(bosc_gemm, target="riscv")
     (work / "kernel.mlir").write_text(artifact.kernel_source)
 
