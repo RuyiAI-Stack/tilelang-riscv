@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -679,7 +680,45 @@ def _resolve_riscv_gcc_root() -> Path | None:
     default_root = Path("/opt/gcc-native")
     if default_root.is_dir():
         return default_root.resolve()
+
+    # Fallback: standard Linux layout /usr/lib/gcc/<triple>/<version>.
+    # We look for crtbeginS.o and take the parent as the GCC root, which is
+    # what clang's --gcc-toolchain expects. This fixes openEuler riscv64
+    # (and similar) where no /opt/gcc-native exists.
+    import glob as _glob
+    for crt in sorted(_glob.glob("/usr/lib/gcc/*/*/crtbeginS.o")):
+        return Path(crt).resolve().parent
     return None
+
+
+def _resolve_riscv_gcc_install_dir() -> Path | None:
+    """Return the exact GCC install dir (containing crtbeginS.o) for --gcc-install-dir.
+
+    Prefers the standard Linux layout /usr/lib/gcc/<triple>/<version>/; falls
+    back to the running gcc's own path when the layout is non-standard.
+    """
+    import glob as _glob
+    for crt in sorted(_glob.glob("/usr/lib/gcc/*/*/crtbeginS.o")):
+        return Path(crt).resolve().parent
+    gcc_bin = shutil.which("gcc")
+    if gcc_bin is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [gcc_bin, "-print-file-name=crtbeginS.o"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    crt_path = proc.stdout.strip()
+    if not crt_path or not Path(crt_path).is_file():
+        return None
+    # <install>/lib/gcc/<triple>/<version>/crtbeginS.o -> we want <install>
+    return Path(crt_path).resolve().parents[3]
 
 
 def _riscv_gcc_runtime_library_dirs(gcc_root: Path) -> list[Path]:
@@ -734,6 +773,12 @@ def _riscv_clang_flags(
             for runtime_dir in _riscv_gcc_runtime_library_dirs(gcc_root):
                 flags.append(f"-L{runtime_dir}")
                 flags.append(f"-Wl,-rpath,{runtime_dir}")
+    # On hosts where clang cannot resolve the GCC runtime layout via
+    # --gcc-toolchain alone (e.g. openEuler riscv64), also point it at the
+    # exact GCC install dir so crtbeginS.o / libgcc resolve.
+    gcc_install_dir = _resolve_riscv_gcc_install_dir()
+    if gcc_install_dir is not None:
+        flags.append(f"--gcc-install-dir={gcc_install_dir}")
     if os.environ.get("TILELANG_RISCV_MARCH"):
         flags.append(f"-march={os.environ['TILELANG_RISCV_MARCH']}")
     if include_abi and os.environ.get("TILELANG_RISCV_ABI"):
@@ -743,6 +788,125 @@ def _riscv_clang_flags(
     if os.environ.get("TILELANG_RISCV_CLANG_FLAGS"):
         flags.extend(shlex.split(os.environ["TILELANG_RISCV_CLANG_FLAGS"]))
     return flags
+
+
+_RISCV_TOOLCHAIN_ENV_VARS = (
+    "TILELANG_RISCV_LLVM_ROOT",
+    "TILELANG_LLVM_INSTALL_DIR",
+    "TILELANG_RISCV_GCC_ROOT",
+    "GCC_ROOT",
+    "CC",
+    "CXX",
+    "TILELANG_HOST_TRIPLE",
+    "TILELANG_RISCV_MARCH",
+    "TILELANG_RISCV_ABI",
+    "TILELANG_RISCV_CPU",
+    "TILELANG_RISCV_CLANG_FLAGS",
+    "TILELANG_RISCV_CLANG_OPT_LEVEL",
+)
+
+
+def _normalize_triple_vendor(triple: str) -> str | None:
+    """Normalize a target triple's vendor field to `unknown` when present."""
+    parts = triple.split("-")
+    if len(parts) >= 3 and parts[1] != "unknown":
+        return "-".join([parts[0], "unknown", *parts[2:]])
+    return None
+
+
+def _find_compiler_rt_builtins(clang_path: Path, triple: str | None) -> Path | None:
+    """Probe clang's resource directory for a matching compiler-rt builtins archive."""
+    try:
+        proc = subprocess.run([str(clang_path), "-print-resource-dir"], text=True, capture_output=True, check=False)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    resource_dir_text = proc.stdout.strip()
+    if not resource_dir_text:
+        return None
+    resource_lib_dir = Path(resource_dir_text) / "lib"
+    if not resource_lib_dir.is_dir():
+        return None
+
+    arch = triple.split("-")[0] if triple else ""
+    candidates: list[Path] = []
+    if triple:
+        candidates.append(resource_lib_dir / triple / "libclang_rt.builtins.a")
+        normalized_triple = _normalize_triple_vendor(triple)
+        if normalized_triple:
+            candidates.append(resource_lib_dir / normalized_triple / "libclang_rt.builtins.a")
+    if arch:
+        candidates.append(resource_lib_dir / "linux" / f"libclang_rt.builtins-{arch}.a")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    if arch:
+        for candidate in sorted(resource_lib_dir.glob(f"{arch}-*/libclang_rt.builtins.a")):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _compiler_rt_builtins_flags(clang_path: Path, triple: str | None) -> list[str]:
+    """Return `-L`/`-l` linker flags for the discovered compiler-rt builtins archive."""
+    builtins_lib = _find_compiler_rt_builtins(clang_path, triple)
+    if builtins_lib is None:
+        return []
+    lib_name = builtins_lib.stem
+    if lib_name.startswith("lib"):
+        lib_name = lib_name[3:]
+    return [f"-L{builtins_lib.parent}", f"-l{lib_name}"]
+
+
+def _has_explicit_compiler_rt_flag(flags: list[str]) -> bool:
+    """Return True when caller flags already configure compiler-rt or builtins."""
+    return any(flag.startswith(("-rtlib=", "--rtlib=")) or "clang_rt.builtins" in flag for flag in flags)
+
+
+def _supports_no_undefined_linker_flag(triple: str | None) -> bool:
+    """Return True on ELF/GNU-style targets where `-Wl,--no-undefined` is supported."""
+    if triple:
+        lower = triple.lower()
+        return not any(token in lower for token in ("darwin", "apple", "macos", "windows", "mingw", "msvc"))
+    return sys.platform.startswith("linux")
+
+
+def _file_fingerprint(path: Path | None) -> dict[str, Any] | None:
+    """Return a lightweight identity record for a toolchain file if available."""
+    if path is None:
+        return None
+    try:
+        resolved = path.resolve()
+        stat = resolved.stat()
+        return {"path": str(resolved), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    except OSError:
+        return {"path": str(path)}
+
+
+def riscv_toolchain_fingerprint(triple: str | None = None) -> dict[str, Any]:
+    """Return an uncached, JSON-serializable fingerprint of the active RISC-V toolchain."""
+    env_values = {name: os.environ.get(name, "") for name in _RISCV_TOOLCHAIN_ENV_VARS}
+    clang_path = resolve_tool("clang", required=False)
+    gcc_root = _resolve_riscv_gcc_root()
+    active_triple = triple or os.environ.get("TILELANG_HOST_TRIPLE") or None
+    if active_triple is None and clang_path is not None:
+        try:
+            proc = subprocess.run([str(clang_path), "-dumpmachine"], text=True, capture_output=True, check=False)
+            if proc.returncode == 0 and proc.stdout.strip():
+                active_triple = proc.stdout.strip()
+        except OSError:
+            pass
+    builtins_path = _find_compiler_rt_builtins(clang_path, active_triple) if clang_path is not None else None
+    return {
+        "env": env_values,
+        "gcc_root": str(gcc_root) if gcc_root is not None else None,
+        "triple": active_triple,
+        "clang": _file_fingerprint(clang_path),
+        "compiler_rt_builtins": _file_fingerprint(builtins_path),
+    }
 
 
 def _infer_riscv_abi_flag(obj_path: Path) -> list[str]:
@@ -940,8 +1104,9 @@ def build_host_shared_library(
         opt_level = os.environ.get("TILELANG_RISCV_CLANG_OPT_LEVEL", "2").lower()
         if opt_level not in {"0", "1", "2", "3", "s", "z"}:
             raise RiscvRunnerError("TILELANG_RISCV_CLANG_OPT_LEVEL must be one of 0, 1, 2, 3, s, or z")
+        clang_path = resolve_tool("clang")
         cmd = [
-            str(resolve_tool("clang")),
+            str(clang_path),
             "-shared",
             "-fPIC",
             f"-O{opt_level}",
@@ -965,9 +1130,14 @@ def build_host_shared_library(
         active_triple = triple or resolve_host_triple()
         if active_triple:
             cmd.extend(["-target", active_triple])
-        cmd.extend(_riscv_clang_flags(include_runtime_library_dirs=True))
+        if _supports_no_undefined_linker_flag(active_triple):
+            cmd.append("-Wl,--no-undefined")
+        extra_flags = _riscv_clang_flags(include_runtime_library_dirs=True)
         if clang_flags:
-            cmd.extend(clang_flags)
+            extra_flags.extend(clang_flags)
+        cmd.extend(extra_flags)
+        if not _has_explicit_compiler_rt_flag(extra_flags):
+            cmd.extend(_compiler_rt_builtins_flags(clang_path, active_triple))
         _run_checked(cmd)
     return out_path
 
