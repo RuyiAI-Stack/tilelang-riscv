@@ -41,3 +41,12 @@ buddy-opt kernel.mlir --canonicalize --cse --kernel-contract-annotate --kernel-c
 ```
 
 该步骤检查中性契约。目标规划、AME 指令生成和运行时数值验证由后续阶段完成。
+
+在 SG2044 上运行两个上游算子测试集，同时记录每次实际编译的修复前后检查结果：
+
+```bash
+python testing/python/riscv/audit_bosc_private_writes.py --report /tmp/bosc-contract.json
+```
+
+JSON 按 pytest 用例列出实际观察到的编译；每对不同 IR 记录 Buddy 的退出码和首条诊断。
+上游测试使用启用配置的版本执行原有数值断言。

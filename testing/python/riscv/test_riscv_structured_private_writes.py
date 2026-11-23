@@ -74,7 +74,9 @@ def test_buddy_point_write_requires_initialized_siblings(initialized):
         source = tilelang.lower(update, target="riscv").kernel_source
     result = subprocess.run(
         [buddy, "--canonicalize", "--cse", "--kernel-contract-annotate", "--kernel-contract-verify", "-o", "/dev/null"],
-        input=source, capture_output=True, text=True,
+        input=source,
+        capture_output=True,
+        text=True,
     )
     if initialized:
         assert result.returncode == 0, result.stderr
