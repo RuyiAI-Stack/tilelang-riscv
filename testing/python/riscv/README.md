@@ -87,6 +87,21 @@ tests compile fresh artifacts. The SG2044 environment also needs its native
 LLVM/MLIR and GCC library paths; see the
 [SG2044 build guide](../../../docs/get_started/BuildOnSG2044.md).
 
+## Engram Hash IR and PyTorch comparison
+
+From the repository root, with the RISC-V test toolchain configured as above,
+run the existing Engram Hash correctness test with artifact export enabled:
+
+```bash
+TILELANG_DISABLE_CACHE=1 TILELANG_ENGRAM_HASH_ARTIFACTS=artifacts/engram-hash \
+  python3 -m pytest -qs testing/python/riscv/TileKernels/test_engram_hash_kernel.py
+```
+
+The test prints a new run directory containing `input.tir.py`, TIR pass dumps
+under `tir-passes/`, `kernel.mlir`, and `comparison.json`. The JSON records
+the execution architecture, seed, pass/fail verdict and both output tensors.
+A numeric mismatch writes the comparison and fails pytest.
+
 ## Validation scope
 
 The dedicated [Buddy MLIR CI workflow](../../../.github/workflows/ci-buddy-mlir.yml)

@@ -205,6 +205,15 @@ class KernelCache:
         except OSError:
             pass
 
+    @staticmethod
+    def _is_riscv_target(target: str | Target | None) -> bool:
+        if isinstance(target, Target):
+            return target.kind.name == "riscv"
+        if isinstance(target, str):
+            normalized = target.strip()
+            return normalized == "riscv" or normalized.startswith("riscv ")
+        return False
+
     def _generate_key(
         self,
         func: Callable,
@@ -247,6 +256,10 @@ class KernelCache:
             from tilelang.tladapter.toolchain import resolve_optimizer
 
             key_data["riscv_optimizer"] = str(resolve_optimizer())
+        if self._is_riscv_target(target):
+            from tilelang.jit.adapter.riscv.wrapper import riscv_toolchain_fingerprint
+
+            key_data["riscv_toolchain"] = riscv_toolchain_fingerprint()
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key
